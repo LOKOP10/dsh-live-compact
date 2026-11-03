@@ -1,6 +1,6 @@
 {
   "name": "dsh-live-compact",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "In-place newest-turn compaction for DeepSeek Harness. Compress while the task runs and keep the prefix.",
   "license": "MIT",
   "type": "module",
@@ -29,11 +29,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-compaction": ">=0.2.0-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-compaction-basic": ">=0.2.0-rc.2 <0.3.0"
+    "@deepseek-ai/dsh-compaction-basic": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-compaction": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2"
   },
   "dsh": {
     "bundle": {

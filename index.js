@@ -1,13 +1,17 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { BasicCompactionEngine, compactSurfaceRegion } from "@deepseek-ai/dsh-compaction-basic";
-import { toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { buildCard, planMessages, RAIL_TOKENS } from "./plan.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
+const SUMMARY_OPEN_TAG = "<compacted-summary>";
+const SUMMARY_CLOSE_TAG = "</compacted-summary>";
+const CHECKPOINT_PREAMBLE = "This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.";
 const CHUNK_MIN = 1000;
 const CHUNK_MAX = RAIL_TOKENS;
 const BIG_GATE = 650000;
@@ -201,13 +205,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         try {
           state.localOnly = true;
           state.approvedCard = chunk.card;
-          await compactSurfaceRegion(this.regionDependencies(), agent.session, chunk.start, chunk.end, agent, {
-            owner: null,
-            stability: "selected-span",
-            flush: async () => {
-              await this.ctx.sessions.flush(agent.session);
-            },
-          }, op);
+          await this.commitSelectedSpan(agent, chunk, op);
           const after = this.ctx.tokenMeter.measure(agent.session).totalTokens;
           reduced = after < before;
           this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens}`);
@@ -227,6 +225,50 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     } finally {
       state.localOnly = false;
     }
+  }
+
+  async commitSelectedSpan(agent, chunk, signal) {
+    signal?.throwIfAborted();
+    const session = agent.session;
+    const nodes = session.surface.nodes;
+    const startIdx = nodes.indexOf(chunk.start);
+    const endIdx = nodes.indexOf(chunk.end);
+    if (startIdx < 0 || endIdx < startIdx) throw new Error("spine: selected span is not on the surface");
+    const shadowedSeqs = nodes.slice(startIdx, endIdx + 1);
+    const messages = [];
+    for (const seq of shadowedSeqs) messages.push({ role: "assistant", content: eventText(session, seq) });
+    const summarized = await this.summarize({ messages }, agent, signal);
+    const compactionId = CompactionId(randomUUID());
+    const checkpointMessage = createUserMessage({
+      content: [
+        { type: "text", text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
+        ...summarized.summary,
+        { type: "text", text: SUMMARY_CLOSE_TAG },
+      ],
+      source: compactCheckpointSource(compactionId),
+    });
+    const framedTokens = this.ctx.tokenMeter.estimateMessage?.(checkpointMessage);
+    if (typeof framedTokens === "number" && framedTokens >= chunk.tokens) {
+      throw new Error(`summary is not smaller than the shadowed content (${framedTokens} >= ${chunk.tokens})`);
+    }
+    const lifecycle = { compactionId, turn: null };
+    const startEvent = session.append("compaction/start", lifecycle);
+    const summaryEvent = session.append("compaction/summary", {
+      compactionId,
+      summary: summarized.summary,
+      ...summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput },
+      shadowedRange: { start: chunk.start, end: chunk.end },
+      shadowedSeqs: [...shadowedSeqs],
+      shadowedTokenCount: chunk.tokens,
+      provider: summarized.provider,
+      model: summarized.model,
+    });
+    session.append("user/message", checkpointMessage, {
+      surfaceOp: { op: "replace", startSeq: chunk.start, endSeq: chunk.end },
+      sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowedSeqs],
+    });
+    session.append("compaction/end", lifecycle);
+    await this.ctx.sessions.flush(session);
   }
 
   rememberPrefix(agent) {

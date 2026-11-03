@@ -21,17 +21,17 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 ## 安装
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.0.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.1.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.0.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.1.tgz"
 dsh-live-compact --version
 ```
 
-需要 DSH `>=0.2.0-rc.2 <0.3.0`。装上后跑长任务，日志里出现 `spine cut …ms` 才算这刀生效。页面：https://download.merkyorlynn.com/live-compact.html
+需要 DSH `>=0.2.0-rc.2 <0.3.0`。1.0.1 不再引用宿主包未导出的内部函数，干净安装可以激活。装上后跑长任务，日志里出现 `spine cut …ms` 才算这刀生效。页面：https://download.merkyorlynn.com/live-compact.html
 
 DSH-TUI 先不要装。它的预设里还挂着原版压缩，这个包换不掉。
 

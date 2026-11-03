@@ -10,4 +10,4 @@ if (arg === "--version" || arg === "-v") {
   process.exit(0);
 }
 console.log(`${pkg.name} ${pkg.version}`);
-console.log("dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.0.tgz");
+console.log("dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.1.tgz");
