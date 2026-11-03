@@ -39,23 +39,36 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 长链路 20 题是另一场。原版第 15 题才做模型摘要，14.552 秒，切掉 520,460。压完上下文掉到 15.5 万，结束时又回到 433,844。插件 20 刀，74 毫秒，切掉 486,193。题末平均上下文 217,276，比原版 366,942 低 40.8%。结束上下文 323,726，比原版低 25.4%。题末采样命中率原版 99.87%，插件 99.90%。第 20 题那一跳原版 99.84%，插件 99.95%。采样命中率按每题末次请求的 token 加权，平均上下文取 20 个题末快照。
 
+## 1.0.2 改了什么
+
+1.0.2 改的是摘要怎么写。安装地址是新的，1.0.0 和 1.0.1 的旧包还在原来的链接上。
+
+模型写在回复里的话，1.0.1 会原样抄进摘要，再标成确认过。下一轮会把这些句子当成你说过的话。1.0.2 不再这样写。
+
+- 思考过程不进摘要，也不进备份。
+- 留下的每一行标原来是谁说的。句子里写着「用户说」，也不会变成你的新指令。
+- 去掉「已确认」。摘要开头写明：这是旧内容摘录，不是新指令，也不是你的授权。
+- 这一刀如果没有合格的摘要，就整段留下，不去调模型。
+- 备份只有自己能读。文件名不带会话号。本机路径不发给模型。备份目录超过 64MB，这一刀不切，旧文件不自动删。
+- 2 万和 65 万没动。配置里的 0.8 只管官方大压缩，不管这一刀。想改小切的起点，只能在启动前设 `SPINE_MIN_TOKENS`。
+
 ## 安装
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.1.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.2.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.1.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.2.tgz"
 dsh-live-compact --version
 ```
 
-需要 DSH `>=0.2.0-rc.2 <0.3.0`。1.0.1 不再引用宿主包未导出的内部函数，干净安装可以激活。装上后跑长任务，日志里出现 `spine cut …ms` 才算这刀生效。页面：https://download.merkyorlynn.com/live-compact.html
+需要 DSH `>=0.2.0-rc.2 <0.3.0`。装上后跑长任务，日志里出现 `spine cut …ms` 才算这刀生效。页面：https://download.merkyorlynn.com/live-compact.html
 
 DSH-TUI 先不要装。它的预设里还挂着原版压缩，这个包换不掉。
 
-被切掉的原文会明文写到 `~/.dsh/compaction-spine/shadow`，只增不删，要自己清理。
+被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。只增不删，超过 64MB 就不再切，要自己清理。
 
 MIT，见 `LICENSE`。

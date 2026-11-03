@@ -6,6 +6,7 @@
       name: dsh-live-compact
       config:
         auto: true
+        # 0.8 only affects the stock large compaction. The 20k live cut does not read it.
         thresholdRatio: 0.8
         headroomTokens: 65536
         retainTokens: 8192
