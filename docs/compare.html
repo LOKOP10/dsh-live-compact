@@ -29,27 +29,26 @@
   <h1>150 题 · 同一个会话</h1>
   <div class="sub">Aider polyglot-benchmark 7e0611e。Python、Go、JavaScript、Rust、Java 各 30 题，没有 C++。五种语言按字母序穿插。</div>
   <div class="pills">
-    <div class="pill">新策略比原版便宜 <b>23%</b></div>
-    <div class="pill">比旧策略便宜 <b>9%</b></div>
+    <div class="pill">比原版便宜 <b>23%</b></div>
     <div class="pill">预热 <b>0 次</b></div>
+    <div class="pill">命中率 <b>99.56%</b></div>
   </div>
   <table>
     <tr>
       <th></th>
       <th class="num">原版</th>
-      <th class="num">旧策略 0827337</th>
-      <th class="num">新策略 45a2afb</th>
+      <th class="num">边做边压 1.0.0</th>
     </tr>
-    <tr><td>通过</td><td class="num">150/150</td><td class="num">149/150</td><td class="num new">150/150</td></tr>
-    <tr><td>命中率</td><td class="num">99.55%</td><td class="num">99.70%</td><td class="num new">99.56%</td></tr>
-    <tr><td>缓存命中</td><td class="num">335.0M</td><td class="num">246.0M</td><td class="num new">244.3M</td></tr>
-    <tr><td>缓存未命中</td><td class="num">1.498M</td><td class="num">0.750M</td><td class="num new">1.088M</td></tr>
-    <tr><td>费用</td><td class="num">$1.50</td><td class="num">$1.27（含预热 $0.16）</td><td class="num new">$1.15（预热 0）</td></tr>
-    <tr><td>峰值</td><td class="num">679K</td><td class="num">585K</td><td class="num new">589K</td></tr>
-    <tr><td>压缩</td><td class="num">1 次，12.8 秒</td><td class="num">145 刀，2.3 秒</td><td class="num new">145 刀，474K，2.2 秒</td></tr>
-    <tr><td>墙钟</td><td class="num">8,531 秒</td><td class="num">8,481 秒</td><td class="num new">6,105 秒</td></tr>
+    <tr><td>通过</td><td class="num">150/150</td><td class="num new">150/150</td></tr>
+    <tr><td>命中率</td><td class="num">99.55%</td><td class="num new">99.56%</td></tr>
+    <tr><td>缓存命中</td><td class="num">335.0M</td><td class="num new">244.3M</td></tr>
+    <tr><td>缓存未命中</td><td class="num">1.498M</td><td class="num new">1.088M</td></tr>
+    <tr><td>费用</td><td class="num">$1.50</td><td class="num new">$1.15（预热 0）</td></tr>
+    <tr><td>峰值</td><td class="num">679K</td><td class="num new">589K</td></tr>
+    <tr><td>压缩</td><td class="num">1 次，12.8 秒</td><td class="num new">145 刀，474K，2.2 秒</td></tr>
+    <tr><td>墙钟</td><td class="num">8,531 秒</td><td class="num new">6,105 秒</td></tr>
   </table>
-  <div class="note">公开仓 1.0.0 就是新策略。145 刀，切掉 474,393 token，2,190 毫秒。峰值 589,414，结束 589,554，没到 65 万。未命中比旧策略多 0.34M，是卡片改记到下一问。墙钟 6,105 秒这轮只跑了新策略一边，快出来的时间不能全算在插件上。</div>
+  <div class="note">公开仓 1.0.0 就是这一版。145 刀，切掉 474,393 token，2,190 毫秒。峰值 589,414，结束 589,554，没到 65 万。墙钟 6,105 秒这轮只跑了插件一边，快出来的时间不能全算在插件上。</div>
 </div>
 <div class="page" id="p20">
   <h1>20 题 · 另一场</h1>
