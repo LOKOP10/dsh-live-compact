@@ -186,10 +186,33 @@ export function hardItems(text, spans = null) {
   return attributedLines(text, spans).map((item) => item.line);
 }
 
+function bodySpans(spans) {
+  if (!spans) return null;
+  return spans.filter((span) => sourceRole(span.role) !== "tool");
+}
+
+export function shadowSections(message) {
+  const role = sourceRole(message?.role ?? message?.message?.role);
+  const content = message?.content ?? message?.message?.content;
+  const sections = [];
+  const visible = messageText(message);
+  if (visible) sections.push(`[${role}]\n${visible}`);
+  if (Array.isArray(content)) {
+    const reasoning = content
+      .filter((block) => block && (block.type === "reasoning" || block.type === "thinking") && typeof block.text === "string" && block.text.length > 0)
+      .map((block) => block.text)
+      .join("\n");
+    if (reasoning) sections.push(`[${role}:reasoning]\n${reasoning}`);
+  }
+  if (sections.length === 0) sections.push(`[${role}]`);
+  return sections.join("\n\n");
+}
+
 export function buildCard(spanText, liveText = "", spans = null) {
-  const span = String(spanText || "");
+  const visible = bodySpans(spans);
+  const span = visible ? visible.map((item) => item.text).join("\n") : String(spanText || "");
   const live = String(liveText || "");
-  const hard = attributedLines(span, spans);
+  const hard = attributedLines(span, visible);
   const split = planText(span);
   const kept = [];
   let used = 0;
@@ -211,7 +234,7 @@ export function buildCard(spanText, liveText = "", spans = null) {
       deferred += 1;
       continue;
     }
-    kept.push({ role: roleForLine(line, spans), line });
+    kept.push({ role: roleForLine(line, visible), line });
     keptLines.add(line);
     used += line.length;
   }

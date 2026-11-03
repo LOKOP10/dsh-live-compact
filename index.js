@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { buildCard, messageText, planMessages, RAIL_TOKENS, sourceRole, takeLocalCut } from "./plan.js";
+import { buildCard, messageText, planMessages, RAIL_TOKENS, shadowSections, takeLocalCut } from "./plan.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
@@ -20,6 +20,13 @@ const MAX_TAIL = 2200;
 const MIN_PRESSURE = Number(process.env.SPINE_MIN_TOKENS || 20000);
 const MAX_TRACKED_SESSIONS = 64;
 const DEFAULT_KEY = "__default__";
+
+function eventContent(session, seq) {
+  const event = session.eventAt(seq);
+  if (event?.type === "assistant/message") return event.data?.message?.content ?? event.data?.content;
+  if (event?.type === "user/message") return event.data?.content ?? event.data?.message?.content;
+  return event?.data?.content ?? event?.data?.message?.content ?? event?.data;
+}
 
 function eventText(session, seq) {
   const event = session.eventAt(seq);
@@ -105,10 +112,7 @@ function tightenShadow(dir) {
 }
 
 function shadowBody(messages) {
-  return (messages || []).map((message) => {
-    const role = sourceRole(message?.role ?? message?.message?.role);
-    return `[${role}]\n${messageText(message)}`;
-  }).join("\n\n");
+  return (messages || []).map((message) => shadowSections(message)).join("\n\n");
 }
 
 function shadowName() {
@@ -289,7 +293,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (chunk.card?.ok !== true || !chunk.card.text) throw new Error("spine: approved card missing; leaving the span");
     const shadowedSeqs = nodes.slice(startIdx, endIdx + 1);
     const messages = [];
-    for (const seq of shadowedSeqs) messages.push({ role: eventRole(session, seq), content: eventText(session, seq) });
+    for (const seq of shadowedSeqs) messages.push({ role: eventRole(session, seq), content: eventContent(session, seq) });
     const summarized = await this.summarize({ messages, liveCompact: { card: chunk.card } }, agent, signal);
     const compactionId = CompactionId(randomUUID());
     const checkpointMessage = createUserMessage({

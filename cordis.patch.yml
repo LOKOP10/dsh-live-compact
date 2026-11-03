@@ -11,3 +11,16 @@
         headroomTokens: 65536
         retainTokens: 8192
         compactionRetries: 0
+    - id: live-compact-gate
+      name: dsh-live-compact/gate
+
+# Web and Desktop presets isolate compaction. These rows wait for the gate,
+# which rewrites the nested compaction-basic package name when the preset resolves.
+- id: preset-standard
+  inject: [liveCompactPresetGate]
+- id: preset-ptc
+  inject: [liveCompactPresetGate]
+- id: preset-minimal
+  inject: [liveCompactPresetGate]
+- id: preset-cordis
+  inject: [liveCompactPresetGate]

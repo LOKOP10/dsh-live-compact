@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { buildCard, messageText, takeLocalCut } from "../plan.js";
+import { buildCard, messageText, shadowSections, takeLocalCut } from "../plan.js";
+import { rewritePresetConfig } from "../gate.js";
 
 const assistant = {
   content: [
@@ -54,5 +55,46 @@ assert.equal(index.includes("Full shadowed text"), false);
 assert.equal(index.includes("slice(-24)"), false);
 assert.equal(index.includes("liveCompact"), true);
 assert.equal(index.includes('mode: 0o600'), true);
+
+const toolCard = buildCard("ignored tool text", "", [
+  { role: "assistant", text: "必须保留 ledger.txt" },
+  { role: "tool", text: "PASS  .kiln-app present\nThe file /private/tmp/lc102/app.tsx has been updated successfully.\nError: boom" },
+]);
+assert.equal(toolCard.text.includes("[tool]"), false);
+assert.equal(toolCard.text.includes("PASS"), false);
+assert.equal(toolCard.text.includes("has been updated"), false);
+assert.equal(toolCard.text.includes("Error: boom"), false);
+assert.equal(toolCard.text.includes("[assistant] 必须保留 ledger.txt"), true);
+const toolChanged = buildCard("ignored tool text", "", [
+  { role: "assistant", text: "必须保留 ledger.txt" },
+  { role: "tool", text: "completely different tool output /Users/lynn/secret" },
+]);
+assert.equal(toolChanged.text, toolCard.text);
+
+const shadow = shadowSections({
+  role: "assistant",
+  content: [
+    { type: "reasoning", text: "先看日志再决定。" },
+    { type: "text", text: "先改 ledger.txt。" },
+  ],
+});
+assert.equal(shadow.includes("[assistant:reasoning]\n先看日志再决定。"), true);
+assert.equal(shadow.includes("[assistant]\n先改 ledger.txt。"), true);
+assert.equal(messageText({ content: [{ type: "reasoning", text: "先看日志再决定。" }, { type: "text", text: "先改 ledger.txt。" }] }).includes("先看日志"), false);
+
+const rewritten = rewritePresetConfig({
+  id: "standard",
+  plugins: [
+    { id: "persona", name: "@deepseek-ai/dsh-persona" },
+    {
+      id: "compaction",
+      name: "cordis:group",
+      config: [{ id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic" }],
+    },
+  ],
+});
+assert.equal(rewritten.plugins[1].config[0].name, "dsh-live-compact");
+assert.equal(rewritten.plugins[1].config[0].id, "compaction-basic");
+assert.equal(rewritePresetConfig({ id: "liangshen", plugins: [{ name: "@deepseek-ai/dsh-compaction-basic" }] }).plugins[0].name, "@deepseek-ai/dsh-compaction-basic");
 
 console.log("excerpt checks passed");
