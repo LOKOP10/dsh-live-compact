@@ -58,18 +58,19 @@ assert.equal(index.includes('mode: 0o600'), true);
 
 const toolCard = buildCard("ignored tool text", "", [
   { role: "assistant", text: "必须保留 ledger.txt" },
-  { role: "tool", text: "PASS  .kiln-app present\nThe file /private/tmp/lc102/app.tsx has been updated successfully.\nError: boom" },
+  { role: "tool", text: "CONTINUITY-TOKEN-7F3A\nport=47821\n" },
+  { role: "tool", text: `${"PASS line\n".repeat(40)}The file /private/tmp/lc102/app.tsx has been updated successfully.` },
 ]);
-assert.equal(toolCard.text.includes("[tool]"), false);
-assert.equal(toolCard.text.includes("PASS"), false);
-assert.equal(toolCard.text.includes("has been updated"), false);
-assert.equal(toolCard.text.includes("Error: boom"), false);
 assert.equal(toolCard.text.includes("[assistant] 必须保留 ledger.txt"), true);
-const toolChanged = buildCard("ignored tool text", "", [
-  { role: "assistant", text: "必须保留 ledger.txt" },
-  { role: "tool", text: "completely different tool output /Users/lynn/secret" },
-]);
-assert.equal(toolChanged.text, toolCard.text);
+assert.equal(toolCard.text.includes("│ CONTINUITY-TOKEN-7F3A"), true);
+assert.equal(toolCard.text.includes("│ port=47821"), true);
+assert.equal(toolCard.text.includes("PASS line"), false);
+assert.equal(toolCard.text.includes("工具输出已省略"), true);
+const wrapped = "<path>/tmp/secret.txt</path>\n<type>file</type>\n<content>\n1: CONTINUITY-TOKEN-7F3A\n2: port=47821\n3: owner=reef-keeper\n\n(End of file - total 3 lines)\n</content>";
+const secretCard = buildCard("", "", [{ role: "tool", text: wrapped }]);
+assert.equal(secretCard.text.includes("CONTINUITY-TOKEN-7F3A"), true);
+assert.equal(secretCard.text.includes("47821"), true);
+assert.equal(toolCard.text.includes("/Users/"), false);
 
 const shadow = shadowSections({
   role: "assistant",

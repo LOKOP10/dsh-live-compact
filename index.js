@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { buildCard, messageText, planMessages, RAIL_TOKENS, shadowSections, takeLocalCut } from "./plan.js";
+import { attachBackupHint, buildCard, messageText, planMessages, RAIL_TOKENS, shadowSections, takeLocalCut } from "./plan.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
@@ -115,8 +115,9 @@ function shadowBody(messages) {
   return (messages || []).map((message) => shadowSections(message)).join("\n\n");
 }
 
-function shadowName() {
-  return `${Date.now()}-${randomBytes(8).toString("hex")}.txt`;
+function shadowName(backupId) {
+  const id = backupId || randomBytes(4).toString("hex");
+  return `${Date.now()}-${id}-${randomBytes(4).toString("hex")}.txt`;
 }
 
 function selectNewestChunk(session, measurement) {
@@ -138,7 +139,12 @@ function selectNewestChunk(session, measurement) {
   const spanPieces = (spanStart, spanEnd) => {
     const pieces = [];
     for (let index = spanStart; index <= spanEnd; index += 1) {
-      pieces.push({ role: eventRole(session, nodes[index]), text: eventText(session, nodes[index]) });
+      const event = session.eventAt(nodes[index]);
+      pieces.push({
+        role: eventRole(session, nodes[index]),
+        text: eventText(session, nodes[index]),
+        isError: Boolean(event?.data?.message?.isError || event?.data?.isError),
+      });
     }
     return pieces;
   };
@@ -171,7 +177,7 @@ function selectNewestChunk(session, measurement) {
     start += 1;
   }
   if (start > end || tokens < CHUNK_MIN || isCheckpoint(session, nodes[start])) return null;
-  card = buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end));
+  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end)), randomBytes(4).toString("hex"));
   if (card.ok !== true) return null;
   if (!cutOk(toolPairingBalancedAfter, session, nodes[end])) return null;
   let after = 0;
@@ -369,7 +375,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       if (required) throw new Error("spine: shadow backup is full; leaving the span");
       return;
     }
-    const file = join(shadow, shadowName());
+    const file = join(shadow, shadowName(this.backupId));
     writeFileSync(file, body, { mode: 0o600 });
     chmodSync(file, 0o600);
   }
@@ -380,6 +386,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     state.approvedCard = null;
     if (decision.kind === "refuse") throw new Error(decision.reason);
     if (decision.kind === "local") {
+      this.backupId = input?.liveCompact?.card?.backupId;
       this.saveShadow(input.messages, true);
       const block = { type: "text", text: decision.text };
       return { summary: [block], provider: "local", model: "spine-extract", rawOutput: [block] };

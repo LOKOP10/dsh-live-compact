@@ -41,6 +41,12 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 长链路 20 题是另一场。原版第 15 题才做模型摘要，14.552 秒，切掉 520,460。压完上下文掉到 15.5 万，结束时又回到 433,844。插件 20 刀，74 毫秒，切掉 486,193。题末平均上下文 217,276，比原版 366,942 低 40.8%。结束上下文 323,726，比原版低 25.4%。题末采样命中率原版 99.87%，插件 99.90%。第 20 题那一跳原版 99.84%，插件 99.95%。采样命中率按每题末次请求的 token 加权，平均上下文取 20 个题末快照。
 
+## 1.0.4 改了什么
+
+1.0.4 安装地址是新的。1.0.0 到 1.0.3 的旧包还在原来的链接上。
+
+短的工具结果会留在摘要里，标成工具输出，不标已确认。不超过 12 行、也不超过 512 字，整段留下。更长的只留一行：多少字、正文已省略。省略的原文在本机 `~/.dsh/compaction-spine/shadow`，文件名含这次的短编号。需要再读，不要默认读进来。思考仍不进摘要。
+
 ## 1.0.3 改了什么
 
 1.0.3 安装地址是新的。1.0.0、1.0.1、1.0.2 的旧包还在原来的链接上。
@@ -62,19 +68,19 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.3.tgz
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz
 ```
 
 网页和 Desktop 用对应的 profile 装同一个包：
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.3.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.3.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz"
 dsh-live-compact --version
 ```
 
