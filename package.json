@@ -5,10 +5,14 @@
   "license": "MIT",
   "type": "module",
   "main": "index.js",
+  "bin": {
+    "dsh-live-compact": "./bin/dsh-live-compact.js"
+  },
   "files": [
     "index.js",
     "plan.js",
     "thunder.js",
+    "bin",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
