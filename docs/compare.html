@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>边做边压 测评</title>
+<style>
+  :root { --bg:#0c0e12; --card:#171a21; --line:#2a3140; --text:#f4f6f8; --muted:#9aa3b2; --orange:#ff7a2f; --green:#3dd68c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:"PingFang SC","Noto Sans SC","Helvetica Neue",sans-serif; }
+  .page { width:1920px; padding:56px 64px 48px; }
+  h1 { margin:0 0 8px; font-size:54px; letter-spacing:-1px; }
+  .sub { color:var(--muted); font-size:24px; margin-bottom:36px; }
+  h2 { margin:0 0 18px; font-size:32px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:22px; overflow:hidden; }
+  th, td { padding:18px 22px; text-align:left; font-size:26px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:22px; }
+  td.num, th.num { font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:0; }
+  .new { color:var(--orange); font-weight:700; }
+  .note { margin-top:18px; color:var(--muted); font-size:20px; line-height:1.55; }
+  .gap { height:48px; }
+  .pills { display:flex; gap:16px; margin:0 0 28px; }
+  .pill { background:#222833; border-radius:999px; padding:10px 18px; font-size:20px; color:#d5dbe6; }
+  .pill b { color:var(--green); font-weight:700; }
+</style>
+</head>
+<body>
+<div class="page" id="p150">
+  <h1>150 题 · 同一个会话</h1>
+  <div class="sub">Aider polyglot-benchmark 7e0611e。Python、Go、JavaScript、Rust、Java 各 30 题，没有 C++。五种语言按字母序穿插。</div>
+  <div class="pills">
+    <div class="pill">新策略比原版便宜 <b>23%</b></div>
+    <div class="pill">比旧策略便宜 <b>9%</b></div>
+    <div class="pill">预热 <b>0 次</b></div>
+  </div>
+  <table>
+    <tr>
+      <th></th>
+      <th class="num">原版</th>
+      <th class="num">旧策略 0827337</th>
+      <th class="num">新策略 45a2afb</th>
+    </tr>
+    <tr><td>通过</td><td class="num">150/150</td><td class="num">149/150</td><td class="num new">150/150</td></tr>
+    <tr><td>命中率</td><td class="num">99.55%</td><td class="num">99.70%</td><td class="num new">99.56%</td></tr>
+    <tr><td>缓存命中</td><td class="num">335.0M</td><td class="num">246.0M</td><td class="num new">244.3M</td></tr>
+    <tr><td>缓存未命中</td><td class="num">1.498M</td><td class="num">0.750M</td><td class="num new">1.088M</td></tr>
+    <tr><td>费用</td><td class="num">$1.50</td><td class="num">$1.27（含预热 $0.16）</td><td class="num new">$1.15（预热 0）</td></tr>
+    <tr><td>峰值</td><td class="num">679K</td><td class="num">585K</td><td class="num new">589K</td></tr>
+    <tr><td>压缩</td><td class="num">1 次，12.8 秒</td><td class="num">145 刀，2.3 秒</td><td class="num new">145 刀，474K，2.2 秒</td></tr>
+    <tr><td>墙钟</td><td class="num">8,531 秒</td><td class="num">8,481 秒</td><td class="num new">6,105 秒</td></tr>
+  </table>
+  <div class="note">公开仓 1.0.0 就是新策略。145 刀，切掉 474,393 token，2,190 毫秒。峰值 589,414，结束 589,554，没到 65 万。未命中比旧策略多 0.34M，是卡片改记到下一问。墙钟 6,105 秒这轮只跑了新策略一边，快出来的时间不能全算在插件上。</div>
+</div>
+<div class="page" id="p20">
+  <h1>20 题 · 另一场</h1>
+  <div class="sub">WebUniverse 长任务，同一个会话。不是上面那 150 题，不并进一张表。</div>
+  <table>
+    <tr>
+      <th></th>
+      <th class="num">原版</th>
+      <th class="num">边做边压 1.0.0</th>
+    </tr>
+    <tr><td>第 15 题压缩</td><td class="num">1 次模型摘要，14.6 秒，切掉 520,460</td><td class="num new">本地切，不调模型</td></tr>
+    <tr><td>压完当时上下文</td><td class="num">154,667</td><td class="num new">同题仍在小切</td></tr>
+    <tr><td>第 20 题结束上下文</td><td class="num">433,844</td><td class="num new">323,726</td></tr>
+    <tr><td>第 20 题这一跳</td><td class="num">缓存 432,512 / 未命中 677 / 99.84%</td><td class="num new">缓存 322,944 / 未命中 170 / 99.95%</td></tr>
+    <tr><td>全程压缩</td><td class="num">1 次，14,552 毫秒</td><td class="num new">20 刀，74 毫秒</td></tr>
+  </table>
+  <div class="note">原版第 15 题 webuniverse-13146 才碰到大门。压完上下文掉到 15.5 万，第 20 题又涨回 43.4 万。插件 20 刀都在本地，结束时还低 11 万。这是第 20 题结束那一跳的命中，不是 150 题那种全程加总。</div>
+</div>
+</body>
+</html>
