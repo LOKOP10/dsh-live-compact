@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { attachBackupHint, buildCard, messageText, planMessages, RAIL_TOKENS, shadowSections, takeLocalCut } from "./plan.js";
+import { rotateShadow, shadowFileBody, shadowMaxBytes } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
@@ -72,52 +73,23 @@ function sessionKey(agent) {
   return typeof id === "string" && id.length > 0 ? id : DEFAULT_KEY;
 }
 
-function shadowMaxBytes() {
-  const raw = Number(process.env.SPINE_SHADOW_MAX_MB || 64);
-  if (!Number.isFinite(raw) || raw <= 0) return 64 * 1024 * 1024;
-  return Math.floor(raw * 1024 * 1024);
-}
-
-function directoryBytes(dir) {
-  let total = 0;
-  let names = [];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return 0;
-  }
-  for (const name of names) {
-    try {
-      total += statSync(join(dir, name)).size;
-    } catch {}
-  }
-  return total;
-}
-
 function tightenShadow(dir) {
   try {
     chmodSync(dir, 0o700);
   } catch {}
-  let names = [];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    try {
-      chmodSync(join(dir, name), 0o600);
-    } catch {}
-  }
 }
 
 function shadowBody(messages) {
   return (messages || []).map((message) => shadowSections(message)).join("\n\n");
 }
 
-function shadowName(backupId) {
-  const id = backupId || randomBytes(4).toString("hex");
-  return `${Date.now()}-${id}-${randomBytes(4).toString("hex")}.txt`;
+function freshShadowFile(kind) {
+  return join(shadowDirectory(), `${kind}-${Date.now()}-${randomBytes(4).toString("hex")}.txt`);
+}
+
+function shadowFilePath(requested) {
+  if (requested) return requested;
+  return freshShadowFile("shadow");
 }
 
 function selectNewestChunk(session, measurement) {
@@ -177,7 +149,7 @@ function selectNewestChunk(session, measurement) {
     start += 1;
   }
   if (start > end || tokens < CHUNK_MIN || isCheckpoint(session, nodes[start])) return null;
-  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end)), randomBytes(4).toString("hex"));
+  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end)), freshShadowFile("cut"));
   if (card.ok !== true) return null;
   if (!cutOk(toolPairingBalancedAfter, session, nodes[end])) return null;
   let after = 0;
@@ -191,20 +163,33 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   // Per-session state. One engine instance can serve several agents, so nothing
   // here may live on `this` directly or one agent's card/prefix leaks into another.
   sessionState = new Map();
+  shadowFullWarned = new Set();
 
   constructor(ctx, config) {
+    if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
     super(ctx, config);
-    ctx.on("agent/status", ({ agent, status }) => {
-      if (status !== "idle") return;
-      const state = this.stateFor(agent);
-      if (state.warming) return;
-      const done = agent.session.snapshotEvents().some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
-      if (!done) return;
-      state.warming = true;
-      void this.finishTurn(agent).finally(() => {
-        state.warming = false;
+    try {
+      const pendingCuts = new Set();
+      ctx.effect(() => async () => {
+        await Promise.allSettled(pendingCuts);
       });
-    });
+      ctx.on("agent/status", ({ agent, status }) => {
+        if (status !== "idle") return;
+        const state = this.stateFor(agent);
+        if (state.warming) return;
+        const done = agent.session.snapshotEvents().some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
+        if (!done) return;
+        state.warming = true;
+        const job = this.finishTurn(agent).finally(() => {
+          state.warming = false;
+          pendingCuts.delete(job);
+        });
+        pendingCuts.add(job);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.logger?.warn?.(`spine: 本会话未接管自动小切。${message}`);
+    }
   }
 
   stateFor(agent) {
@@ -366,18 +351,47 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     return super.compactIfNeeded(agent, trigger, signal);
   }
 
-  saveShadow(messages, required) {
-    const body = shadowBody(messages);
+  warnShadowFull(key, shadow, used, cap) {
+    const id = key || DEFAULT_KEY;
+    if (this.shadowFullWarned.has(id)) return;
+    this.shadowFullWarned.add(id);
+    this.ctx.logger?.warn?.(`spine: shadow ${shadow} 已用 ${used}，上限 ${cap}。删不掉旧备份，这一刀不切。`);
+  }
+
+  warnShadowOversize(key, cap) {
+    const id = key || DEFAULT_KEY;
+    if (this.shadowFullWarned.has(`oversize:${id}`)) return;
+    this.shadowFullWarned.add(`oversize:${id}`);
+    this.ctx.logger?.warn?.(`spine: 这一份备份超过上限 ${cap}，已写下，其他可删备份已清。`);
+  }
+
+  saveShadow(messages, required, shadowFile, warnKey = DEFAULT_KEY) {
     const shadow = shadowDirectory();
     mkdirSync(shadow, { recursive: true, mode: 0o700 });
     tightenShadow(shadow);
-    if (directoryBytes(shadow) + Buffer.byteLength(body) > shadowMaxBytes()) {
+    const file = shadowFilePath(shadowFile);
+    const body = shadowFileBody(warnKey, shadowBody(messages));
+    const incoming = Buffer.byteLength(body);
+    const cap = shadowMaxBytes();
+    const rotation = rotateShadow({
+      dir: shadow,
+      incomingBytes: incoming,
+      protectPath: file,
+      sessionKey: warnKey,
+      cap,
+    });
+    if (!rotation.ok) {
+      this.warnShadowFull(warnKey, shadow, rotation.used, cap);
       if (required) throw new Error("spine: shadow backup is full; leaving the span");
       return;
     }
-    const file = join(shadow, shadowName(this.backupId));
+    if (rotation.deleted > 0) {
+      this.ctx.logger?.info?.(`spine: shadow 轮换 删除 ${rotation.deleted} 个文件，腾出 ${rotation.freed} 字节，用量 ${rotation.used + incoming}/${cap}`);
+    }
+    if (rotation.oversize) this.warnShadowOversize(warnKey, cap);
     writeFileSync(file, body, { mode: 0o600 });
     chmodSync(file, 0o600);
+    if (!existsSync(file)) throw new Error("spine: shadow backup was not written");
   }
 
   async summarize(input, agent, signal) {
@@ -386,13 +400,15 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     state.approvedCard = null;
     if (decision.kind === "refuse") throw new Error(decision.reason);
     if (decision.kind === "local") {
-      this.backupId = input?.liveCompact?.card?.backupId;
-      this.saveShadow(input.messages, true);
+      const card = input?.liveCompact?.card;
+      if (card?.needsBackup && !card.shadowFile) throw new Error("spine: omit refused; backup path missing");
+      this.saveShadow(input.messages, true, card?.shadowFile, state.key);
+      if (card?.needsBackup && !existsSync(card.shadowFile)) throw new Error("spine: shadow backup was not written");
       const block = { type: "text", text: decision.text };
       return { summary: [block], provider: "local", model: "spine-extract", rawOutput: [block] };
     }
     try {
-      this.saveShadow(input.messages, false);
+      this.saveShadow(input.messages, false, freshShadowFile("official"), state.key);
     } catch {}
     const joined = input.messages.map(messageText).join("\n\n");
     if (process.env.SPINE_THUNDER !== "1") return super.summarize(input, agent, signal);

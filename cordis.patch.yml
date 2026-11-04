@@ -1,4 +1,5 @@
-# Replaces the stock compaction engine. A context loads one ctx.compaction.
+# Host stock stays disabled so this engine can register ctx.compaction.
+# Presets are not injected, so a missing gate cannot leave them waiting.
 - id: compaction-basic
   disabled: true
 - insert:
@@ -6,7 +7,7 @@
       name: dsh-live-compact
       config:
         auto: true
-        # 0.8 only affects the stock large compaction. The 20k live cut does not read it.
+        # These three values are also copied onto the web preset engine by gate.js.
         thresholdRatio: 0.8
         headroomTokens: 65536
         retainTokens: 8192
@@ -14,13 +15,4 @@
     - id: live-compact-gate
       name: dsh-live-compact/gate
 
-# Web and Desktop presets isolate compaction. These rows wait for the gate,
-# which rewrites the nested compaction-basic package name when the preset resolves.
-- id: preset-standard
-  inject: [liveCompactPresetGate]
-- id: preset-ptc
-  inject: [liveCompactPresetGate]
-- id: preset-minimal
-  inject: [liveCompactPresetGate]
-- id: preset-cordis
-  inject: [liveCompactPresetGate]
+

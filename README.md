@@ -41,6 +41,20 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 长链路 20 题是另一场。原版第 15 题才做模型摘要，14.552 秒，切掉 520,460。压完上下文掉到 15.5 万，结束时又回到 433,844。插件 20 刀，74 毫秒，切掉 486,193。题末平均上下文 217,276，比原版 366,942 低 40.8%。结束上下文 323,726，比原版低 25.4%。题末采样命中率原版 99.87%，插件 99.90%。第 20 题那一跳原版 99.84%，插件 99.95%。采样命中率按每题末次请求的 token 加权，平均上下文取 20 个题末快照。
 
+## 1.0.5 改了什么
+
+1.0.5 安装地址是新的。1.0.2、1.0.3、1.0.4 的旧包还在原来的链接上。修的是 1.0.4 实测里的五处：
+
+- 预设不再硬等 gate。gate 加载失败时，网页预设不会卡在等待。换包前先试加载，失败就保留原版名字。
+- 换上之后带上 0.8、65536、8192。预设里已有的配置优先。
+- 预设 id 写在外层或内层都能换。standard、ptc、cordis、minimal 在 0.2.1-rc.5 上都会换。TUI 仍不碰。
+- 命令输出只有结构信号才标成报错原文：`isError`、非 0 退出码、`[stderr]`、`[exit code: N]`、`[Command finished with exit code N]`、`exit_code=N`、ptc 结果里的 `"exitCode": N`。证据不够就标状态未知，留原文末尾几行。
+- 长输出要先把备份写成功，卡片才指向那个文件。写失败就不切，也不指向一个还不存在的文件。
+- 备份写成一个确定的文件，编号不存在共享引擎上。卡片里写这次备份的实际路径。
+- 官方工具结果修剪器裁掉的内容不进这份备份。备份上限 128MB。写满后删最老的备份腾到上限的 80%，当前这刀的文件不删。删不掉才停切，同一次会话只警告一次。
+- 外壳先加载。引擎装不上时，这一会话不挂起。能改用原版就用原版，并记下「本会话未接管」。原版也装不上时，`/compact` 马上返回错误。
+- headless 的宿主包自己关掉了原版压缩。插件不能把那一行重新打开。网页预设不注入 gate，漏换这一轮就继续用原版。
+
 ## 1.0.4 改了什么
 
 1.0.4 安装地址是新的。1.0.0 到 1.0.3 的旧包还在原来的链接上。
@@ -68,19 +82,19 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz
 ```
 
 网页和 Desktop 用对应的 profile 装同一个包：
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.4.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz"
 dsh-live-compact --version
 ```
 
@@ -88,6 +102,20 @@ dsh-live-compact --version
 
 DSH-TUI 同样换不掉预设里的原版压缩，先不要装。
 
-被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。只增不删，超过 64MB 就不再切，要自己清理。
+被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。上限 128MB。快满时自动删最老的备份，先删别的会话，再删本会话更早的刀，删到大约 102MB 停。当前卡片指向的那一份不删。目录里不是这个插件写的文件不删，权限也不改。
+
+改上限：
+
+```sh
+export SPINE_SHADOW_MAX_BYTES=67108864
+```
+
+想自己清：
+
+```sh
+rm -f ~/.dsh/compaction-spine/shadow/cut-*.txt ~/.dsh/compaction-spine/shadow/official-*.txt ~/.dsh/compaction-spine/shadow/shadow-*.txt
+```
+
+设了 `DSH_HOME` 或 `SPINE_SHADOW_DIR` 时，目录在那边。删不掉旧文件时，这一刀不切，同一次会话只警告一次。
 
 MIT，见 `LICENSE`。

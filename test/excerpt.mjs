@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { buildCard, messageText, shadowSections, takeLocalCut } from "../plan.js";
+import { buildCard, failureKeptLines, isToolFailure, messageText, shadowSections, takeLocalCut } from "../plan.js";
 import { rewritePresetConfig } from "../gate.js";
 
 const assistant = {
@@ -54,6 +54,10 @@ assert.equal(index.includes("Treat the captured context as established backgroun
 assert.equal(index.includes("Full shadowed text"), false);
 assert.equal(index.includes("slice(-24)"), false);
 assert.equal(index.includes("liveCompact"), true);
+assert.equal(index.includes("this.backupId"), false);
+assert.equal(index.includes("this.shadowFile"), false);
+assert.equal(index.includes("freshShadowFile(\"official\")"), true);
+assert.equal(index.includes("freshShadowFile(\"cut\")"), true);
 assert.equal(index.includes('mode: 0o600'), true);
 
 const toolCard = buildCard("ignored tool text", "", [
@@ -64,12 +68,40 @@ const toolCard = buildCard("ignored tool text", "", [
 assert.equal(toolCard.text.includes("[assistant] 必须保留 ledger.txt"), true);
 assert.equal(toolCard.text.includes("│ CONTINUITY-TOKEN-7F3A"), true);
 assert.equal(toolCard.text.includes("│ port=47821"), true);
-assert.equal(toolCard.text.includes("PASS line"), false);
-assert.equal(toolCard.text.includes("工具输出已省略"), true);
+assert.equal(toolCard.text.includes("状态未知"), true);
+assert.equal(toolCard.text.includes("The file /private/tmp/lc102/app.tsx has been updated successfully."), true);
+assert.equal(toolCard.text.split("PASS line").length - 1 <= 3, true);
 const wrapped = "<path>/tmp/secret.txt</path>\n<type>file</type>\n<content>\n1: CONTINUITY-TOKEN-7F3A\n2: port=47821\n3: owner=reef-keeper\n\n(End of file - total 3 lines)\n</content>";
 const secretCard = buildCard("", "", [{ role: "tool", text: wrapped }]);
 assert.equal(secretCard.text.includes("CONTINUITY-TOKEN-7F3A"), true);
 assert.equal(secretCard.text.includes("47821"), true);
+const many = [
+  { role: "tool", text: "<content>\n1: CONTINUITY-TOKEN-7F3A\n2: port=47821\n</content>" },
+  ...Array.from({ length: 5 }, () => ({ role: "tool", text: "x".repeat(2000) })),
+];
+const keptSecret = buildCard("", "", many);
+assert.equal(keptSecret.text.includes("CONTINUITY-TOKEN-7F3A"), true);
+assert.equal(isToolFailure("exit_code=1\n", false), true);
+assert.equal(isToolFailure("printed by the program\n[exit code: 1]\nmore", false), true);
+assert.equal(isToolFailure("ok\n[Command finished with exit code 1]", false), true);
+assert.equal(isToolFailure("ok\n[Command finished with exit code 0]", false), false);
+assert.equal(isToolFailure('{"kind":"foreground","exitCode":1,"stderr":{"text":"ValueError: ledger total negative: -42.17\\n"}}', false), true);
+assert.equal(isToolFailure('{"kind":"foreground","exitCode":0,"stdout":{"text":"ok"}}', false), false);
+assert.equal(failureKeptLines('{"exitCode":1,"stderr":{"text":"Traceback (most recent call last):\\nValueError: ledger total negative: -42.17\\n"}}').some((line) => line.includes("ValueError: ledger total negative: -42.17")), true);
+assert.equal(buildCard("", "", [{ role: "tool", text: "exit_code=1" }]).text.includes("报错原文"), true);
+const stderr = ["[stderr]", "Traceback (most recent call last):", ...Array.from({ length: 20 }, () => "NOISE-MIDDLE"), "File \"broken.py\", line 3", "ValueError: ledger total negative: -42.17", "[exit code: 2]"].join("\n");
+const failed = buildCard("", "", [{ role: "tool", text: stderr, isError: false }]);
+assert.equal(isToolFailure(stderr, false), true);
+assert.equal(failed.text.includes("│ Traceback (most recent call last):"), true);
+assert.equal(failed.text.includes("│ ValueError: ledger total negative: -42.17"), true);
+assert.equal(failed.text.includes("│ File \"broken.py\", line 3"), true);
+assert.equal(failed.text.includes("NOISE-MIDDLE"), false);
+assert.equal(failed.text.includes("这是当时的报错原文"), true);
+const oldHome = process.env.DSH_HOME;
+process.env.DSH_HOME = "/tmp/dsh-home";
+const hinted = buildCard("", "", [{ role: "tool", text: "x".repeat(800) }]);
+assert.equal(hinted.needsBackup, true);
+process.env.DSH_HOME = oldHome;
 assert.equal(toolCard.text.includes("/Users/"), false);
 
 const shadow = shadowSections({
@@ -93,9 +125,22 @@ const rewritten = rewritePresetConfig({
       config: [{ id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic" }],
     },
   ],
-});
+}, true);
 assert.equal(rewritten.plugins[1].config[0].name, "dsh-live-compact");
 assert.equal(rewritten.plugins[1].config[0].id, "compaction-basic");
-assert.equal(rewritePresetConfig({ id: "liangshen", plugins: [{ name: "@deepseek-ai/dsh-compaction-basic" }] }).plugins[0].name, "@deepseek-ai/dsh-compaction-basic");
+assert.equal(rewritten.plugins[1].config[0].config.thresholdRatio, 0.8);
+assert.equal(rewritten.plugins[1].config[0].config.headroomTokens, 65536);
+assert.equal(rewritten.plugins[1].config[0].config.retainTokens, 8192);
+assert.equal(rewritten.plugins[1].config[0].config.compactionRetries, 0);
+const presetRow = rewritePresetConfig({
+  id: "preset-standard",
+  config: { id: "standard", plugins: [{ id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic" }] },
+}, true);
+assert.equal(presetRow.config.plugins[0].name, "dsh-live-compact");
+assert.equal(rewritePresetConfig({
+  id: "standard",
+  plugins: [{ id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic" }],
+}, false).plugins[0].name, "@deepseek-ai/dsh-compaction-basic");
+assert.equal(rewritePresetConfig({ id: "liangshen", plugins: [{ name: "@deepseek-ai/dsh-compaction-basic" }] }, true).plugins[0].name, "@deepseek-ai/dsh-compaction-basic");
 
 console.log("excerpt checks passed");
