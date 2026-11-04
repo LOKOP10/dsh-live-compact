@@ -137,7 +137,21 @@ dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plu
 dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
 ```
 
-和 CLI 一样，也可以先装到本机再看版本：
+1.0.6 已经上了 npm，也可以直接用包名装：
+
+```sh
+dsh plugin --profile headless add dsh-live-compact@1.0.6
+dsh plugin --profile web add dsh-live-compact@1.0.6
+```
+
+想先装到本机看版本，用 npm：
+
+```sh
+npm install -g dsh-live-compact
+dsh-live-compact --version
+```
+
+上不了 npm 的，用国内镜像的包：
 
 ```sh
 npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz"
