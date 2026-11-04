@@ -16,6 +16,10 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 两场不混在一张表里。150 道是编程短题，串在同一次对话里。20 题是 WebUniverse 长链路。
 
+npm：https://www.npmjs.com/package/dsh-live-compact
+
+GitHub：https://github.com/MerkyorLynn/dsh-live-compact
+
 国内镜像：https://download.merkyorlynn.com/live-compact.html
 
 ![150 题和 20 题](docs/slide-results.jpg)
