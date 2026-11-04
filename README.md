@@ -56,6 +56,35 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 长链路 20 题是另一场。原版第 15 题才做模型摘要，14.552 秒，切掉 520,460。压完上下文掉到 15.5 万，结束时又回到 433,844。插件 20 刀，74 毫秒，切掉 486,193。题末平均上下文 217,276，比原版 366,942 低 40.8%。结束上下文 323,726，比原版低 25.4%。题末采样命中率原版 99.87%，插件 99.90%。第 20 题那一跳原版 99.84%，插件 99.95%。采样命中率按每题末次请求的 token 加权，平均上下文取 20 个题末快照。
 
+## 长填日志
+
+1.0.6 跑了 8 组。每组 31 轮，其中 23 轮读一份 520 行日志，报告 WARN 条数和 NOTICE 原文。没有 NOTICE 就写 NONE。真实 DeepSeek。
+
+![长填日志](docs/slide-fill.jpg)
+
+| | 结果 |
+|---|---:|
+| 填日志回合 | 184 |
+| 跳过工具直接报数字 | 0 |
+| WARN | 184/184 |
+| NOTICE | 184/184 |
+| 假 NOTICE | 0 |
+| 切过的会话 | 8/8，共 17 刀 |
+
+8 组都切过，不是没压缩才碰巧对。这次提示没有「没有工具结果就不要给数字」。和早先一次 54/184 跳过工具的记录不是同一份日志重放。65 万停切线这版没动。
+
+## 1.0.6 改了什么
+
+1.0.6 安装地址是新的。1.0.2、1.0.3、1.0.4、1.0.5 的旧包还在原来的链接上。
+
+- 配置报错不再被盖成「服务已被注册」。装不上时能看见原来的原因。
+- 备份按会话分目录。卡片只指向这一份文件所在的目录。
+- 报错优先进卡片。最近 3 个已经结束的工具轮留在原来的调用和结果里，结果不截短。更早的轮才收成卡片。
+- 助手说的「已提交 / 已发布」不进硬行。卡片只记有调用编号的工具事件，不靠词表。
+- 后台任务照常切。没结束的登记在卡片上，之后的文件以磁盘为准。失败的 kill 不会被记成已结束。
+- 工具原文在官方修剪前按调用编号落盘。卡片给路径、哈希和字节数。写失败就写无完整备份，不留悬空路径。
+- 65 万停切线没改。窗口更大时，过了 65 万仍会停掉小切。
+
 ## 1.0.5 改了什么
 
 1.0.5 安装地址是新的。1.0.2、1.0.3、1.0.4 的旧包还在原来的链接上。修的是 1.0.4 实测里的五处：
@@ -97,19 +126,19 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
 ```
 
 网页和 Desktop 用对应的 profile 装同一个包：
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.5.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz"
 dsh-live-compact --version
 ```
 
@@ -128,7 +157,7 @@ export SPINE_SHADOW_MAX_BYTES=67108864
 想自己清：
 
 ```sh
-rm -f ~/.dsh/compaction-spine/shadow/cut-*.txt ~/.dsh/compaction-spine/shadow/official-*.txt ~/.dsh/compaction-spine/shadow/shadow-*.txt
+rm -f ~/.dsh/compaction-spine/shadow/*/*.txt ~/.dsh/compaction-spine/shadow/*.txt
 ```
 
 设了 `DSH_HOME` 或 `SPINE_SHADOW_DIR` 时，目录在那边。删不掉旧文件时，这一刀不切，同一次会话只警告一次。

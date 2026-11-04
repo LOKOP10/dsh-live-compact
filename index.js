@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { attachBackupHint, buildCard, messageText, planMessages, RAIL_TOKENS, shadowSections, takeLocalCut } from "./plan.js";
-import { rotateShadow, shadowFileBody, shadowMaxBytes } from "./shadow.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, chooseKeptSpan, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, RAIL_TOKENS, readResultLabel, reservedCutEnd, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { captureToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
+import { rotateShadow, sessionDir, shadowFileBody, shadowMaxBytes } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
@@ -19,6 +20,8 @@ const BIG_GATE = 650000;
 const URGENT_TOKENS = 48000;
 const MAX_TAIL = 2200;
 const MIN_PRESSURE = Number(process.env.SPINE_MIN_TOKENS || 20000);
+const KEEP_ROUNDS = Number(process.env.SPINE_KEEP_ROUNDS || 3);
+const KEEP_ROUND_TOKENS = Number(process.env.SPINE_KEEP_ROUND_TOKENS || 32000);
 const MAX_TRACKED_SESSIONS = 64;
 const DEFAULT_KEY = "__default__";
 
@@ -83,16 +86,34 @@ function shadowBody(messages) {
   return (messages || []).map((message) => shadowSections(message)).join("\n\n");
 }
 
-function freshShadowFile(kind) {
-  return join(shadowDirectory(), `${kind}-${Date.now()}-${randomBytes(4).toString("hex")}.txt`);
+function freshShadowFile(kind, key) {
+  const dir = sessionDir(shadowDirectory(), key);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return join(dir, `${kind}-${Date.now()}-${randomBytes(4).toString("hex")}.txt`);
 }
 
-function shadowFilePath(requested) {
+function commandFromCall(event) {
+  if (event?.type !== "tool/call") return "";
+  let args = event.data?.arguments;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = {};
+    }
+  }
+  const command = args?.command || args?.cmd || event.data?.name || "";
+  return String(command || "").split("\n")[0].trim();
+}
+
+function shadowFilePath(requested, key) {
   if (requested) return requested;
-  return freshShadowFile("shadow");
+  return freshShadowFile("shadow", key);
 }
 
-function selectNewestChunk(session, measurement) {
+function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}) {
+  const decision = jobCutDecision(context.jobs || []);
+  if (!decision.cut) return null;
   const nodes = session.surface.nodes;
   const priced = measurement.nodes;
   if (nodes.length === 0 || nodes.length !== priced.length) return null;
@@ -106,17 +127,58 @@ function selectNewestChunk(session, measurement) {
   }
   while (end >= first && isCheckpoint(session, nodes[end])) end -= 1;
   while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
+  let keptTokens = 0;
+  const visible = [];
+  for (let index = first; index <= end; index += 1) {
+    const event = session.eventAt(nodes[index]);
+    const toolCalls = event?.type === "assistant/message"
+      ? (event.data?.message?.content || []).filter((block) => block.type === "tool-call").length
+      : 0;
+    visible.push({ index, type: event?.type === "tool/result" ? "tool" : "other", toolCalls });
+  }
+  const rounds = keptToolRounds(visible, KEEP_ROUNDS);
+  const span = chooseKeptSpan(rounds, (from, to) => {
+    let tokens = 0;
+    for (let index = visible[from.start].index; index <= visible[to.end].index; index += 1) tokens += priced[index].tokens;
+    return tokens;
+  }, KEEP_ROUND_TOKENS);
+  const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;
+  if (span && cutEnd === null) return null;
+  if (cutEnd !== null) {
+    const keptEnd = visible[span.end].index;
+    for (let index = visible[span.start].index; index <= keptEnd; index += 1) keptTokens += priced[index].tokens;
+    end = cutEnd;
+    while (end >= first && (isCheckpoint(session, nodes[end]) || isUser(session, nodes[end]))) end -= 1;
+    while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
+  }
   if (end < first || isCheckpoint(session, nodes[end])) return null;
   if (priced[end].tokens > CHUNK_MAX) return null;
   const spanPieces = (spanStart, spanEnd) => {
     const pieces = [];
-    for (let index = spanStart; index <= spanEnd; index += 1) {
+    let pendingCommand = "";
+    for (let index = 0; index < nodes.length; index += 1) {
       const event = session.eventAt(nodes[index]);
+      const command = commandFromCall(event);
+      if (command) pendingCommand = command;
+      if (index < spanStart || index > spanEnd) continue;
+      const toolCallId = event?.data?.message?.toolCallId || "";
+      const call = toolCallId ? context.calls?.get?.(toolCallId) : null;
+      const isTool = event?.type === "tool/result";
+      const looked = isTool && context.rawLookup && toolCallId ? (context.rawLookup(toolCallId) || { ok: false, toolCallId }) : null;
+      const excerpt = isTool ? rawExcerptText(eventText(session, nodes[index]), looked) : { text: eventText(session, nodes[index]) };
+      const text = excerpt.text;
       pieces.push({
         role: eventRole(session, nodes[index]),
-        text: eventText(session, nodes[index]),
+        text,
         isError: Boolean(event?.data?.message?.isError || event?.data?.isError),
+        command: call?.command || (event?.type === "tool/result" ? pendingCommand : ""),
+        name: call?.name || "",
+        toolCallId,
+        turn: Number.isInteger(event?.data?.turn) ? event.data.turn : call?.turn,
+        backgroundStart: event?.type === "tool/result" && Boolean(backgroundJobId(text)),
+        raw: looked ? (excerpt.raw?.ok ? excerpt.raw : { ok: false, toolCallId }) : undefined,
       });
+      if (event?.type === "tool/result") pendingCommand = "";
     }
     return pieces;
   };
@@ -129,16 +191,17 @@ function selectNewestChunk(session, measurement) {
     }
     return bits.join("\n");
   };
+  const extras = { jobs: context.jobs || [] };
   let start = end;
   let tokens = priced[end].tokens;
-  let card = buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end));
+  let card = buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end), extras);
   if (card.ok !== true) return null;
   while (start > first) {
     const prev = start - 1;
     if (isCheckpoint(session, nodes[prev]) || isUser(session, nodes[prev])) break;
     const nextTokens = tokens + priced[prev].tokens;
     if (nextTokens > CHUNK_MAX) break;
-    const trial = buildCard(spanText(prev, end), liveText(prev, end), spanPieces(prev, end));
+    const trial = buildCard(spanText(prev, end), liveText(prev, end), spanPieces(prev, end), extras);
     if (trial.ok !== true) break;
     tokens = nextTokens;
     start = prev;
@@ -149,12 +212,12 @@ function selectNewestChunk(session, measurement) {
     start += 1;
   }
   if (start > end || tokens < CHUNK_MIN || isCheckpoint(session, nodes[start])) return null;
-  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end)), freshShadowFile("cut"));
+  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end), extras), freshShadowFile("cut", key));
   if (card.ok !== true) return null;
   if (!cutOk(toolPairingBalancedAfter, session, nodes[end])) return null;
   let after = 0;
   for (let index = end + 1; index < priced.length; index += 1) after += priced[index].tokens;
-  return { start: nodes[start], end: nodes[end], tokens, after, card };
+  return { start: nodes[start], end: nodes[end], tokens, after, keptTokens, card };
 }
 
 export { planMessages };
@@ -164,14 +227,21 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   // here may live on `this` directly or one agent's card/prefix leaks into another.
   sessionState = new Map();
   shadowFullWarned = new Set();
+  rawSeen = new Map();
+  pruneGuarded = false;
 
   constructor(ctx, config) {
     if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
     super(ctx, config);
+    if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     try {
       const pendingCuts = new Set();
       ctx.effect(() => async () => {
         await Promise.allSettled(pendingCuts);
+      });
+      ctx.on("session/event", (session, event) => {
+        if (event?.type !== "tool/result") return;
+        this.captureOne(session, event);
       });
       ctx.on("agent/status", ({ agent, status }) => {
         if (status !== "idle") return;
@@ -240,12 +310,20 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const op = AbortSignal.any([agentSignal, signal]);
         const measurement = this.ctx.tokenMeter.measure(agent.session);
         if (measurement.totalTokens < MIN_PRESSURE || measurement.totalTokens >= BIG_GATE) return;
-        const chunk = selectNewestChunk(agent.session, measurement);
+        this.ensurePruneGuard();
+        this.captureSession(agent.session);
+        const events = agent.session.snapshotEvents();
+        const chunk = selectNewestChunk(agent.session, measurement, state.key, {
+          jobs: collectJobs(events),
+          calls: indexToolCalls(events),
+          rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
+        });
         if (chunk === null) {
           this.ctx.logger?.debug?.("spine cut skipped");
           return;
         }
-        if (chunk.after > MAX_TAIL && measurement.totalTokens < URGENT_TOKENS) return;
+        const tailBeyondKept = chunk.after - (chunk.keptTokens || 0);
+        if (tailBeyondKept > MAX_TAIL && measurement.totalTokens < URGENT_TOKENS) return;
         const before = measurement.totalTokens;
         const started = Date.now();
         let reduced = false;
@@ -284,7 +362,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (chunk.card?.ok !== true || !chunk.card.text) throw new Error("spine: approved card missing; leaving the span");
     const shadowedSeqs = nodes.slice(startIdx, endIdx + 1);
     const messages = [];
-    for (const seq of shadowedSeqs) messages.push({ role: eventRole(session, seq), content: eventContent(session, seq) });
+    for (const seq of shadowedSeqs) {
+      const event = session.eventAt(seq);
+      messages.push({
+        role: eventRole(session, seq),
+        content: eventContent(session, seq),
+        toolCallId: event?.data?.message?.toolCallId || "",
+      });
+    }
     const summarized = await this.summarize({ messages, liveCompact: { card: chunk.card } }, agent, signal);
     const compactionId = CompactionId(randomUUID());
     const checkpointMessage = createUserMessage({
@@ -348,7 +433,113 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const state = this.stateFor(agent);
     state.liveAgent = agent;
     state.localOnly = false;
+    this.ensurePruneGuard();
     return super.compactIfNeeded(agent, trigger, signal);
+  }
+
+  rawKey(session, toolCallId) {
+    return `${session?.id || DEFAULT_KEY}\0${toolCallId}`;
+  }
+
+  captureOne(session, event) {
+    const id = event?.data?.message?.toolCallId;
+    if (!id) return null;
+    const key = session?.id || DEFAULT_KEY;
+    const mapKey = this.rawKey(session, id);
+    if (this.rawSeen.get(mapKey)?.ok) return this.rawSeen.get(mapKey);
+    let call = null;
+    try {
+      call = indexToolCalls(session.snapshotEvents?.() || []).get(id);
+    } catch {}
+    try {
+      const dir = sessionDir(shadowDirectory(), key);
+      try {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        writeFileSync(join(dir, "owner"), String(process.pid), { mode: 0o600 });
+      } catch {}
+      const record = captureToolResult({
+        dir,
+        toolCallId: id,
+        text: messageText(event.data?.message),
+        turn: event.data?.turn,
+        name: call?.name || "",
+        pathLabel: readResultLabel(call?.name, call?.filePath, event.data?.turn),
+      });
+      this.rawSeen.set(mapKey, record);
+      return record;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.ctx?.logger?.warn?.(`spine: raw backup failed: ${message}`);
+      const record = { ok: false, reason: "unwritable", toolCallId: id };
+      this.rawSeen.set(mapKey, record);
+      return record;
+    }
+  }
+
+  captureSession(session) {
+    const seen = new Set();
+    for (const event of session?.snapshotEvents?.() || []) {
+      if (event?.type !== "tool/result") continue;
+      const id = event.data?.message?.toolCallId;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      this.captureOne(session, event);
+    }
+    return seen;
+  }
+
+  surfaceToolIds(session) {
+    const ids = [];
+    for (const seq of session?.surface?.nodes || []) {
+      const event = session.eventAt?.(seq);
+      if (event?.type !== "tool/result") continue;
+      const id = event.data?.message?.toolCallId;
+      if (id) ids.push(id);
+    }
+    return ids;
+  }
+
+  rawVerifiedSet(session) {
+    const prefix = `${session?.id || DEFAULT_KEY}\0`;
+    const ids = new Set();
+    for (const [mapKey, record] of this.rawSeen) {
+      if (!mapKey.startsWith(prefix)) continue;
+      if (verifiedRaw(record).ok) ids.add(mapKey.slice(prefix.length));
+    }
+    return ids;
+  }
+
+  ensurePruneGuard() {
+    if (this.pruneGuarded) return;
+    let pruner;
+    try {
+      pruner = this.ctx.get("toolResultPruner");
+    } catch {
+      return;
+    }
+    if (!pruner?.pruneSession) return;
+    pruner.__spineEngine = this;
+    if (pruner.pruneSession.__spineGuarded) {
+      this.pruneGuarded = true;
+      return;
+    }
+    const original = pruner.pruneSession.bind(pruner);
+    function guarded(session) {
+      const engine = pruner.__spineEngine;
+      engine.captureSession(session);
+      return runPruneAfterCapture(engine.surfaceToolIds(session), engine.rawVerifiedSet(session), () => original(session));
+    }
+    guarded.__spineGuarded = true;
+    pruner.pruneSession = guarded;
+    this.pruneGuarded = true;
+  }
+
+  restoreRawMessages(messages, key) {
+    return (messages || []).map((message) => {
+      const id = message?.toolCallId || message?.message?.toolCallId;
+      if (!id) return message;
+      return restoreToolText(message, this.rawSeen.get(`${key}\0${id}`));
+    });
   }
 
   warnShadowFull(key, shadow, used, cap) {
@@ -365,11 +556,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     this.ctx.logger?.warn?.(`spine: 这一份备份超过上限 ${cap}，已写下，其他可删备份已清。`);
   }
 
-  saveShadow(messages, required, shadowFile, warnKey = DEFAULT_KEY) {
+  saveShadow(messages, required, shadowFile, warnKey = DEFAULT_KEY, protectPaths = []) {
     const shadow = shadowDirectory();
     mkdirSync(shadow, { recursive: true, mode: 0o700 });
     tightenShadow(shadow);
-    const file = shadowFilePath(shadowFile);
+    const file = shadowFilePath(shadowFile, warnKey);
+    const dir = sessionDir(shadow, warnKey);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "owner"), String(process.pid), { mode: 0o600 });
     const body = shadowFileBody(warnKey, shadowBody(messages));
     const incoming = Buffer.byteLength(body);
     const cap = shadowMaxBytes();
@@ -377,6 +571,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       dir: shadow,
       incomingBytes: incoming,
       protectPath: file,
+      protectPaths,
       sessionKey: warnKey,
       cap,
     });
@@ -402,13 +597,15 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (decision.kind === "local") {
       const card = input?.liveCompact?.card;
       if (card?.needsBackup && !card.shadowFile) throw new Error("spine: omit refused; backup path missing");
-      this.saveShadow(input.messages, true, card?.shadowFile, state.key);
+      const restored = this.restoreRawMessages(input.messages, state.key);
+      this.saveShadow(restored, true, card?.shadowFile, state.key, card?.rawPaths || []);
       if (card?.needsBackup && !existsSync(card.shadowFile)) throw new Error("spine: shadow backup was not written");
-      const block = { type: "text", text: decision.text };
+      const text = backupClaimOk(restored) ? decision.text : withoutFullBackupClaim(decision.text, card?.shadowFile);
+      const block = { type: "text", text };
       return { summary: [block], provider: "local", model: "spine-extract", rawOutput: [block] };
     }
     try {
-      this.saveShadow(input.messages, false, freshShadowFile("official"), state.key);
+      this.saveShadow(this.restoreRawMessages(input.messages, state.key), false, freshShadowFile("official", state.key), state.key);
     } catch {}
     const joined = input.messages.map(messageText).join("\n\n");
     if (process.env.SPINE_THUNDER !== "1") return super.summarize(input, agent, signal);
@@ -422,7 +619,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (mode === "attach") return super.summarize(input, agent, signal);
     const users = input.messages.filter((message) => (message?.role ?? message?.message?.role) === "user");
     const taskLine = messageText(users.at(-1) || input.messages.at(-1)).slice(0, 500);
-    const trunk = buildCard(joined, "");
+    const trunk = buildCard(joined, "", input.messages.map((message) => ({
+      role: message?.role ?? message?.message?.role,
+      text: messageText(message),
+    })));
     const facts = [...new Set([...(trunk.hardLines || []), ...(trunk.missing || [])])];
     const slim = buildSendLess({ taskLine, uncovered: trunk.uncovered, facts });
     return super.summarize({
