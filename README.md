@@ -125,8 +125,6 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 ## 安装
 
-headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
-
 从 npm 装（推荐）。headless 和网页/桌面端是两个 profile，用哪个装哪个，两个都用就两条都跑。
 
 headless：
