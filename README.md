@@ -8,12 +8,6 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 超过 2 万 token 就切一刀。切的是刚结束的这一轮，不调用模型。切点前面的原文不动，缓存命中还是原来的水准。上下文因此一直被按在较低的位置。雷霆大压缩能拖就拖，拖到尽可能后面。就算哪天满了、真的触发了，掉下来之后小切还在，不会很快又堆回去。
 
-npm：https://www.npmjs.com/package/dsh-live-compact
-
-GitHub：https://github.com/MerkyorLynn/dsh-live-compact
-
-国内镜像：https://download.merkyorlynn.com/live-compact.html
-
 headless：
 
 ```sh
