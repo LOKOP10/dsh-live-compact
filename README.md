@@ -127,35 +127,25 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
-```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
-```
-
-网页和 Desktop 用对应的 profile 装同一个包：
-
-```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
-```
-
-1.0.6 已经上了 npm，也可以直接用包名装：
+从 npm 装（推荐）：
 
 ```sh
 dsh plugin --profile headless add dsh-live-compact@1.0.6
 dsh plugin --profile web add dsh-live-compact@1.0.6
 ```
 
-想先装到本机看版本，用 npm：
+想先装到本机看版本：
 
 ```sh
 npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-上不了 npm 的，用国内镜像的包：
+备用：上不了 npm 的，用国内镜像站的包：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz"
-dsh-live-compact --version
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
 ```
 
 需要 DSH `>=0.2.0-rc.2 <0.3.0`。装上后跑长任务，日志里出现 `spine cut …ms` 才算这刀生效。页面：https://download.merkyorlynn.com/live-compact.html
