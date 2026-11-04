@@ -127,10 +127,17 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
-从 npm 装（推荐）：
+从 npm 装（推荐）。headless 和网页/桌面端是两个 profile，用哪个装哪个，两个都用就两条都跑。
+
+headless：
 
 ```sh
 dsh plugin --profile headless add dsh-live-compact@1.0.6
+```
+
+网页和桌面端（共用 web profile，装一次两边都生效）：
+
+```sh
 dsh plugin --profile web add dsh-live-compact@1.0.6
 ```
 
@@ -141,10 +148,17 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包：
+备用：上不了 npm 的，用国内镜像站的包，同样按 profile 分开装。
+
+headless：
 
 ```sh
 dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
+```
+
+网页和桌面端：
+
+```sh
 dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
 ```
 
