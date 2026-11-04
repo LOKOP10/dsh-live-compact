@@ -14,6 +14,25 @@ GitHub：https://github.com/MerkyorLynn/dsh-live-compact
 
 国内镜像：https://download.merkyorlynn.com/live-compact.html
 
+headless：
+
+```sh
+dsh plugin --profile headless add dsh-live-compact@1.0.6
+```
+
+网页和桌面端（共用 web profile，装一次两边都生效）：
+
+```sh
+dsh plugin --profile web add dsh-live-compact@1.0.6
+```
+
+想先装到本机看版本：
+
+```sh
+npm install -g dsh-live-compact
+dsh-live-compact --version
+```
+
 ![边做边压](docs/slide-cover.jpg)
 
 ![为什么非要等到 80%](docs/slide-why.jpg)
