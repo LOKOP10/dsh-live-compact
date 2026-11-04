@@ -11,7 +11,8 @@
   "exports": {
     ".": "./shell.js",
     "./engine": "./index.js",
-    "./gate": "./gate.js"
+    "./gate": "./gate.js",
+    "./shadow-search": "./shadow-search.js"
   },
   "files": [
     "shell.js",
@@ -20,6 +21,7 @@
     "plan.js",
     "raw.js",
     "shadow.js",
+    "shadow-search.js",
     "thunder.js",
     "bin",
     "cordis.patch.yml",
