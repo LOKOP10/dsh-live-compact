@@ -92,6 +92,18 @@ dsh-live-compact --version
 
 ![原版对比](docs/slide-stock.jpg)
 
+## 1.0.8
+
+同一套 8 组、184 个填日志回合。真实 DeepSeek。跳过工具 0，WARN 184/184，NOTICE 184/184。缓存命中 98.23%，1.0.6 是 97.88%，原版是 98.51%。题末平均 2.6 万，最高 3.6 万，最低 1.6 万。1.0.6 最高 3.5 万。原版最高 12.6 万。费用按离峰用量估算，1.0.8 是 $0.209，1.0.6 是 $0.211，原版是 $0.229，不是账单。切掉的原文 11.4 万 token。原版没有压缩，8 组题末加起来积累了 34.9 万。
+
+![1.0.8 和 1.0.6、原版](docs/slide-108-vs.jpg)
+
+卡片不再使用官方的 `<compacted-summary>` 和 `compact-checkpoint`。官方压缩会把那种节点当成上一版摘要再摘一次，切片摘要会越压越短。新卡片用 `spine-checkpoint`。已经写过的旧卡片仍会停住，不会再切一遍。
+
+遇到已有卡片就停止往前扩。这是故意的。卡片已经换过一次，再穿过去会改掉已经进缓存的前缀。最新一段不够 1000，就跳过，不回头凑。
+
+单个工具结果超过 3.2 万 token 才只留指针。默认不改。要自己调，启动前设 `SPINE_POINTER_TOKENS`，例如 `8000`。不按占比算。
+
 ## 1.0.7 长填日志
 
 1.0.7 跑了同一套 8 组。真实 DeepSeek。184 个填日志回合都调用了工具。WARN 183/184，NOTICE 184/184，假 NOTICE 是 0。8 组都切过，一共 43 刀。卡片 43 张都有会话序号，没有备份路径。
@@ -170,8 +182,8 @@ dsh-live-compact --version
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.0.7
-dsh plugin --profile web add dsh-live-compact@1.0.7
+dsh plugin --profile headless add dsh-live-compact@1.0.8
+dsh plugin --profile web add dsh-live-compact@1.0.8
 ```
 
 想先装到本机看版本：
@@ -181,12 +193,12 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.6 的旧链接仍在。
+备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.7 的旧链接仍在。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz"
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz"
 dsh-live-compact --version
 ```
 

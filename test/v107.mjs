@@ -28,9 +28,12 @@ assert.equal(fallbackProviderURL("deepseek-official"), "https://api.deepseek.com
 assert.equal(fallbackProviderURL("strata-local"), "");
 assert.equal(resolveEngine({ provider: "deepseek-official", baseURL: fallbackProviderURL("deepseek-official") }).engine, "cloud");
 assert.equal(resolveEngine({ provider: "strata-local", baseURL: "" }).engine, "local");
+assert.equal(selectCutIndexes([
+  user(100), round(50, "assistant"), round(20000), user(100), round(50, "assistant"), round(20000), user(100), round(50, "assistant"), round(1100),
+], { engine: "cloud", totalTokens: 30000 }), null);
 const alreadyEnough = selectCutIndexes([
   user(100), round(50, "assistant"), round(20000), user(100), round(50, "assistant"), round(20000), user(100), round(50, "assistant"), round(1100),
-], { engine: "cloud" });
+], { engine: "cloud", drain: true, totalTokens: 60000 });
 assert.equal(alreadyEnough.tokens <= 32000, true);
 assert.equal(alreadyEnough.start > 3, true);
 assert.equal(selectCutIndexes([
@@ -46,18 +49,21 @@ assert.equal(local, null);
 assert.equal(selectCutIndexes([user(5000)], { engine: "cloud" }), null);
 assert.equal(selectCutIndexes([user(5000)], { engine: "local" }), null);
 
-const onlyHeavy = selectCutIndexes([
+assert.equal(selectCutIndexes([
   user(), round(20000), user(), round(300), round(100), round(100), round(100),
-], { engine: "cloud", maxEnd: 2 });
-assert.equal(onlyHeavy.start, 1);
-assert.equal(onlyHeavy.end, 1);
+], { engine: "cloud", drain: true, totalTokens: 60000 }), null);
+const drainCut = selectCutIndexes([
+  user(), round(20000), user(), round(5000),
+], { engine: "cloud", drain: true, totalTokens: 25000 });
+assert.equal(drainCut.start, 3);
+assert.equal(drainCut.end, 3);
 
-const across = selectCutIndexes([
+assert.equal(selectCutIndexes([
   user(), round(20000), user(), round(300), user(), round(100), round(100), round(100),
-], { engine: "cloud", maxEnd: 4 });
-assert.equal(across.start, 1);
-assert.equal(across.end, 3);
-assert.equal(across.gain, 20300);
+], { engine: "cloud", maxEnd: 4 }), null);
+assert.equal(selectCutIndexes([
+  user(), round(15000), user(), round(15000), user(), round(300), user(), round(100),
+], { engine: "cloud", maxEnd: 5 }), null);
 
 assert.equal(selectCutIndexes([user(1200), round(100)], { engine: "cloud" }), null);
 
@@ -135,6 +141,17 @@ assert.equal(missed.matches.length, 0);
 rmSync(dir, { recursive: true, force: true });
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-assert.equal(pkg.version, "1.0.7");
+assert.equal(pkg.version, "1.0.8");
+const indexSource = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+assert.equal(indexSource.includes("<compacted-summary>"), false);
+assert.equal(indexSource.includes("spine-checkpoint"), true);
+assert.equal(indexSource.includes("compactCheckpointSource"), false);
+const pointed = selectCutIndexes([
+  user(), round(9000),
+], { engine: "local", pointerMax: 8000 });
+assert.equal(pointed.pointerOnly, true);
+assert.equal(selectCutIndexes([
+  user(), round(9000),
+], { engine: "local" }).pointerOnly, undefined);
 assert.equal(pkg.bin["dsh-live-compact"], "bin/dsh-live-compact.js");
 console.log("v107 checks passed");

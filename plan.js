@@ -561,6 +561,7 @@ export function isLocalHost(host) {
 }
 
 // 宿主 listProviders 只给 {id, name}，没有 baseURL。按 id 或 provider 取地址。
+// The host list only has {id, name}. Match either field and read a URL if one is present.
 export function lookupProviderURL(provider, listed) {
   const name = String(provider || "");
   if (!name) return "";
@@ -570,6 +571,8 @@ export function lookupProviderURL(provider, listed) {
 
 // 官方 DeepSeek 的请求头没有 baseURL。没读到自定义地址时用公网默认端点，避免被当成本地而停切。
 // Strata 仍由 provider 名判断，不走这里。
+// Official DeepSeek headers omit baseURL. Use the public endpoint so it is not treated as local.
+// A provider name containing strata stays local and does not use this fallback.
 export function fallbackProviderURL(provider) {
   if (/^(?:deepseek-official|deepseek)$/i.test(String(provider || ""))) return "https://api.deepseek.com/anthropic";
   return "";
@@ -638,49 +641,64 @@ function balanced(items, start, end) {
   return true;
 }
 
-export function selectCutIndexes(items, { engine = "cloud", chunkMin = 1000, chunkMax = 32000, maxEnd = null } = {}) {
+export function selectCutIndexes(items, {
+  engine = "cloud",
+  chunkMin = 1000,
+  chunkMax = 32000,
+  pointerMax = chunkMax,
+  maxEnd = null,
+  totalTokens,
+  drain = false,
+  urgentTokens = 48000,
+  keepBudget = 32000,
+} = {}) {
   if (!items?.length) return null;
-  const limit = maxEnd === null ? items.length - 1 : maxEnd;
+  const cloud = engine !== "local";
+  // 云端平时不切。到原有紧急线，或这一轮已经在收尾，才批量切。
+  // Cloud does not cut on an ordinary turn. Drain only at the existing urgent line, or when this turn already started a drain.
+  const draining = cloud && (drain || (typeof totalTokens === "number" && totalTokens >= urgentTokens));
+  // 收尾时即使已经低于 32000 也继续切到这批的下限。平时低于 32000 不切。
+  // During a drain, keep cutting below 32000. On an ordinary turn, stay under 32000 and do not cut.
+  if (!drain && cloud && typeof totalTokens === "number" && totalTokens <= keepBudget) return null;
+  const limit = draining ? items.length - 1 : (maxEnd === null ? items.length - 1 : maxEnd);
   if (limit < 0) return null;
   const lastUser = items.reduce((found, item, index) => (item.type === "user" ? index : found), -1);
   const firstUser = items.findIndex((item) => item.type === "user");
   const floor = firstUser >= 0 ? firstUser + 1 : 0;
   const oversized = [];
   for (let index = limit; index >= 0; index -= 1) {
-    if ((items[index].tokens || 0) <= chunkMax || items[index].type !== "tool") continue;
-    if (engine === "local" && lastUser >= 0 && index <= lastUser) continue;
+    if (items[index].type !== "tool" || (items[index].tokens || 0) <= pointerMax) continue;
+    if (!cloud && lastUser >= 0 && index <= lastUser) continue;
     oversized.push(index);
   }
-  let end = walkOffTail(items, limit);
-  if (end < 0) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
-  if (engine === "local") {
-    if (lastUser >= 0 && end <= lastUser) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
-    if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+  const pointer = oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
+  // 没到紧急线时，云端只处理超大工具结果，不因一个刚老化的结果改写前缀。
+  // Below the urgent line, cloud only pointer-cuts an oversized tool. One newly aged result does not rewrite the prefix.
+  if (cloud && !draining) return pointer;
+  const end = walkOffTail(items, limit);
+  if (end < 0) return pointer;
+  if (!cloud) {
+    if (lastUser >= 0 && end <= lastUser) return pointer;
+    if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
     if ((items[end].tokens || 0) > chunkMax) return null;
     const local = expandBack(items, end, Math.max(floor, lastUser), { crossUser: false, chunkMax });
     if (local.gain < chunkMin || !balanced(items, local.start, local.end)) return null;
     return local;
   }
-  if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+  if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
   const phase = expandBack(items, end, 0, { crossUser: false, chunkMax });
-  if (phase.gain >= chunkMin) {
-    if (phase.tokens <= chunkMax && balanced(items, phase.start, phase.end) && !(lastUser >= phase.start && lastUser <= phase.end)) return phase;
-    return null;
-  }
-  end = retreatBefore(items, end, lastUser);
-  if (end < floor) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
-  if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
-  const extended = expandBack(items, end, floor - 1, { crossUser: true, chunkMax });
-  if (extended.start < floor) extended.start = floor;
-  extended.gain = nonUserGain(items, extended.start, extended.end);
-  extended.tokens = spanTokens(items, extended.start, extended.end);
-  if (extended.tokens > chunkMax || extended.gain < chunkMin || !balanced(items, extended.start, extended.end)) return null;
-  if (lastUser >= extended.start && lastUser <= extended.end) return null;
-  return extended;
+  // 不跨 user 去凑 1000。不够就跳过。
+  // Do not walk across users to manufacture 1000 tokens. Under that, skip.
+  if (phase.gain < chunkMin) return pointer;
+  if (phase.tokens > chunkMax || !balanced(items, phase.start, phase.end)) return null;
+  if (lastUser >= phase.start && lastUser <= phase.end) return null;
+  return phase;
 }
 
 // pointerOnly 扩到 tool-call 之后，这一段仍不能包含最后一条 user 或 checkpoint。
 // 本地整段必须严格晚于最后一条 user。较早的 user 可以留在段内，由卡片用 JSON 原文保住。
+// After expanding to the tool-call, the span still must not contain the last user or a checkpoint.
+// A local span must start after the last user. An earlier user may stay and be kept as JSON.
 export function pointerSpanAllowed(items, start, end, engine = "cloud") {
   if (!Array.isArray(items) || !Number.isInteger(start) || !Number.isInteger(end)) return false;
   if (start < 0 || end < start || end >= items.length) return false;
@@ -693,6 +711,9 @@ export function pointerSpanAllowed(items, start, end, engine = "cloud") {
   return true;
 }
 
+// 超大工具结果只留序号指针。助手正文不写成工具行。较早用户原文仍是单行 JSON。
+// An oversized tool result keeps a sequence pointer. Assistant prose is not labeled as a tool.
+// An earlier user, if the span includes one, stays as one-line JSON. No backup path.
 export function pointerOnlyText(pieces) {
   const tools = (pieces || []).filter((piece) => sourceRole(piece?.role) === "tool" && Number.isInteger(piece.seq));
   const users = (pieces || []).filter((piece) => sourceRole(piece?.role) === "user" && String(piece.text || "").trim());
