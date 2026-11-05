@@ -8,6 +8,25 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 超过 2 万 token 就切一刀。切的是刚结束的这一轮，不调用模型。切点前面的原文不动，缓存命中还是原来的水准。上下文因此一直被按在较低的位置。雷霆大压缩能拖就拖，拖到尽可能后面。就算哪天满了、真的触发了，掉下来之后小切还在，不会很快又堆回去。
 
+headless：
+
+```sh
+dsh plugin --profile headless add dsh-live-compact@1.0.6
+```
+
+网页和桌面端（共用 web profile，装一次两边都生效）：
+
+```sh
+dsh plugin --profile web add dsh-live-compact@1.0.6
+```
+
+想先装到本机看版本：
+
+```sh
+npm install -g dsh-live-compact
+dsh-live-compact --version
+```
+
 ![边做边压](docs/slide-cover.jpg)
 
 ![为什么非要等到 80%](docs/slide-why.jpg)
@@ -15,8 +34,6 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 ## 两场测评
 
 两场不混在一张表里。150 道是编程短题，串在同一次对话里。20 题是 WebUniverse 长链路。
-
-国内镜像：https://download.merkyorlynn.com/live-compact.html
 
 ![150 题和 20 题](docs/slide-results.jpg)
 
@@ -150,21 +167,25 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 ## 安装
 
-headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
+从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
+
+```sh
+dsh plugin --profile headless add dsh-live-compact@1.0.7
+dsh plugin --profile web add dsh-live-compact@1.0.7
+```
+
+想先装到本机看版本：
+
+```sh
+npm install -g dsh-live-compact
+dsh-live-compact --version
+```
+
+备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.6 的旧链接仍在。
 
 ```sh
 dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
-```
-
-网页和 Desktop 用对应的 profile 装同一个包：
-
-```sh
 dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
-```
-
-和 CLI 一样，也可以先装到本机再看版本：
-
-```sh
 npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz"
 dsh-live-compact --version
 ```
