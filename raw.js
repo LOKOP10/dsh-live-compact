@@ -1,3 +1,10 @@
+/**
+ * 工具原文。按 toolCallId 只写一次，写在官方修剪器换掉表面文本之前。
+ * Raw tool text, written once per toolCallId, before the official pruner replaces the surface.
+ *
+ * 已有文件必须对得上首次 meta 的哈希。对不上就当没有完整备份，不用当前内容给自己重算信任。
+ * An existing file must match the first meta hash. A mismatch is not a backup.
+ */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -79,6 +86,10 @@ export function rawExcerptText(surface, record) {
   return { text: surfaceText, raw: undefined };
 }
 
+// 同一个 toolCallId 只写一次。文件已在就核验 meta，不覆盖。
+// 正文已经带修剪标记、又没有旧文件时，不把修剪后的文本当成原文。
+// Write once per toolCallId. An existing file is verified, never overwritten.
+// Pruned text with no earlier file is not stored as the original.
 export function captureToolResult({ dir, toolCallId, text, turn, name, pathLabel }) {
   if (!toolCallId) return { ok: false, reason: "missing-id", toolCallId: "" };
   const body = String(text ?? "");

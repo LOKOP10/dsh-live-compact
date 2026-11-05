@@ -1,5 +1,11 @@
-// Thin entry. This file must evaluate even when the engine cannot load.
-// A throw here leaves stock disabled and /compact waiting.
+/**
+ * 薄入口。这个文件必须能求值，引擎加载失败也不能把这里抛掉。
+ * Thin entry. This file must evaluate even when the engine cannot load.
+ * A throw here leaves stock disabled and /compact waiting.
+ *
+ * 配置预先检查失败时不构造引擎，也不再构造原版，避免报错被盖成「服务已被注册」。
+ * On a preflight failure, construct neither engine. Stock would register and hide the real error.
+ */
 
 let Engine = null;
 let Stock = null;

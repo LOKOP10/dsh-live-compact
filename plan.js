@@ -1,3 +1,12 @@
+/**
+ * 卡片和切点规划。不读盘，不调模型。
+ * Card text and cut-span planning. No disk, no model call.
+ *
+ * 助手正文不进硬行。硬行里的完成声明必须带真实 toolCallId。
+ * 后台任务不推迟切分，只登记「切时未结束」。
+ * Assistant prose is not a hard line. A completion claim needs a real toolCallId.
+ * Open background jobs do not delay the cut; the card records that they were still running.
+ */
 import { pointerFor } from "./raw.js";
 
 const MARK = "Spine extract.";
@@ -655,6 +664,10 @@ function pointerLines(spans) {
   return lines.filter(Boolean);
 }
 
+// 一张卡片必须比被切掉的原文短，调用方会拒绝变长的结果。
+// 缺一条硬行就不成刀。助手正文不进硬行，所以「已发布」这类句子不会被抄进来。
+// The caller refuses a card that is not shorter than the cut span.
+// One missing hard line refuses the cut. Assistant prose is not a hard line.
 export function buildCard(spanText, liveText = "", spans = null, extras = null) {
   const claims = claimSpans(spans);
   const visible = bodySpans(claims);

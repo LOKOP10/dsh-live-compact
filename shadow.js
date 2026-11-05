@@ -1,3 +1,12 @@
+/**
+ * 备份文件。按会话分目录，默认上限 128MB，快满时删最老的。
+ * Shadow files live in per-session directories. Default cap is 128MB; delete the oldest when nearly full.
+ *
+ * 删除顺序：根目录旧文件，死会话，当前会话的旧文件。
+ * 不删当前卡片指向的文件，也不删别的还活着的会话。ENOENT 当成已经删掉。
+ * Delete legacy root files, then dead sessions, then old files of the current session.
+ * Never delete the current card's file or another live session. ENOENT counts as already freed.
+ */
 import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -127,6 +136,10 @@ export function listShadowEntries(dir, alive = processAlive) {
   return entries;
 }
 
+// 先删根目录旧文件，再删死会话，最后才删当前会话的旧文件。
+// 当前卡片和这次引用的原文路径受保护。删不掉且仍然超限时返回 ok:false。
+// Delete legacy root files, then dead sessions, then old files of this session.
+// Protect the current card and cited raw paths. If unlink fails and the cap is still exceeded, ok is false.
 export function rotateShadow({ dir, incomingBytes, protectPath, protectPaths = [], sessionKey, cap, unlink = unlinkSync, alive = processAlive }) {
   const files = listShadowEntries(dir, alive);
   const protect = new Set([protectPath, ...protectPaths].filter(Boolean).map((path) => resolve(path)));
