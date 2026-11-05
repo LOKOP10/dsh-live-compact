@@ -94,7 +94,7 @@ assert.equal(oversizeBlocked.ok, false);
 assert.equal(oversizeBlocked.failed, true);
 assert.equal(oversizeBlocked.oversize, true);
 assert.equal(shadowMaxBytes({ SPINE_SHADOW_MAX_BYTES: "128" }), 128);
-assert.equal(shadowMaxBytes({}), 128 * 1024 * 1024);
+assert.equal(shadowMaxBytes({}), 256 * 1024 * 1024);
 
 rmSync(root, { recursive: true, force: true });
 console.log("shadow rotation checks passed");

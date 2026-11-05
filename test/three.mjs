@@ -180,7 +180,8 @@ const rawCard = buildCard("", "", [{
   turn: 4,
   raw: saved,
 }]);
-assert.equal(rawCard.text.includes(pointer), true);
+assert.equal(rawCard.text.includes(saved.path), false);
+assert.equal(rawCard.text.includes("不是备份文件路径"), true);
 assert.equal(rawCard.text.includes("[... tool result middle pruned ...]"), false);
 const trust = join(root, "trust");
 mkdirSync(trust);

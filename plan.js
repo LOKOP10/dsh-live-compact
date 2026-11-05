@@ -7,7 +7,6 @@
  * Assistant prose is not a hard line. A completion claim needs a real toolCallId.
  * Open background jobs do not delay the cut; the card records that they were still running.
  */
-import { pointerFor } from "./raw.js";
 
 const MARK = "Spine extract.";
 const KEEP_BUDGET = 8000;
@@ -510,6 +509,208 @@ export function keptToolRounds(events, limit = 3) {
   return rounds.slice(-count);
 }
 
+export function hostOf(baseURL) {
+  const raw = String(baseURL || "").trim();
+  if (!raw) return "";
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    return new URL(withScheme).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function ipv4Parts(host) {
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return parts;
+}
+
+function ipv4Mapped(host) {
+  const dotted = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (dotted) return dotted[1];
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!hex) return "";
+  const hi = Number.parseInt(hex[1], 16);
+  const lo = Number.parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
+function isLocalIPv6(host) {
+  const mapped = ipv4Mapped(host);
+  if (mapped) return isLocalHost(mapped);
+  const first = Number.parseInt(host.split(":")[0] || "0", 16);
+  if (!Number.isFinite(first)) return false;
+  if ((first & 0xfe00) === 0xfc00) return true;
+  if ((first & 0xffc0) === 0xfe80) return true;
+  return false;
+}
+
+export function isLocalHost(host) {
+  const name = String(host || "").toLowerCase();
+  if (!name || name === "localhost" || name.endsWith(".local") || name === "::1") return true;
+  if (name.includes(":")) return isLocalIPv6(name);
+  const parts = ipv4Parts(name);
+  if (!parts) return false;
+  const [a, b] = parts;
+  if (a === 127 || a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+// 宿主 listProviders 只给 {id, name}，没有 baseURL。按 id 或 provider 取地址。
+export function lookupProviderURL(provider, listed) {
+  const name = String(provider || "");
+  if (!name) return "";
+  const match = (listed || []).find((entry) => entry?.provider === name || entry?.id === name);
+  return match?.defaultBaseURL || match?.baseURL || "";
+}
+
+// 官方 DeepSeek 的请求头没有 baseURL。没读到自定义地址时用公网默认端点，避免被当成本地而停切。
+// Strata 仍由 provider 名判断，不走这里。
+export function fallbackProviderURL(provider) {
+  if (/^(?:deepseek-official|deepseek)$/i.test(String(provider || ""))) return "https://api.deepseek.com/anthropic";
+  return "";
+}
+
+export function resolveEngine({ provider = "", baseURL = "", env = process.env } = {}) {
+  const override = String(env.SPINE_ENGINE || "").trim().toLowerCase();
+  if (override === "local" || override === "cloud") return { engine: override, source: "env" };
+  if (/strata/i.test(String(provider || ""))) return { engine: "local", source: "provider" };
+  const host = hostOf(baseURL);
+  if (!host) return { engine: "local", source: "unknown" };
+  if (isLocalHost(host)) return { engine: "local", source: "address" };
+  return { engine: "cloud", source: "address" };
+}
+
+function nonUserGain(items, start, end) {
+  let gain = 0;
+  for (let index = start; index <= end; index += 1) {
+    if (items[index].type !== "user" && items[index].type !== "system") gain += items[index].tokens || 0;
+  }
+  return gain;
+}
+
+function spanTokens(items, start, end) {
+  let tokens = 0;
+  for (let index = start; index <= end; index += 1) tokens += items[index].tokens || 0;
+  return tokens;
+}
+
+function walkOffTail(items, end) {
+  while (end >= 0) {
+    const item = items[end];
+    const shortUser = item.type === "user" && (item.tokens || 0) < 400;
+    if (item.type !== "assistant" && !shortUser && !item.checkpoint) break;
+    end -= 1;
+  }
+  while (end >= 0 && items[end].type === "user") end -= 1;
+  while (end >= 0 && items[end].checkpoint) end -= 1;
+  return end;
+}
+
+function retreatBefore(items, end, boundary) {
+  if (boundary < 0 || end < boundary) return end;
+  end = boundary - 1;
+  while (end >= 0 && (items[end].type === "user" || items[end].checkpoint)) end -= 1;
+  return end;
+}
+
+function expandBack(items, end, stopAt, { crossUser, chunkMax }) {
+  let start = end;
+  let tokens = items[end].tokens || 0;
+  while (start > stopAt) {
+    const prev = start - 1;
+    if (items[prev].checkpoint) break;
+    if (!crossUser && items[prev].type === "user") break;
+    if (tokens + (items[prev].tokens || 0) > chunkMax) break;
+    start = prev;
+    tokens += items[prev].tokens || 0;
+  }
+  return { start, end, tokens, gain: nonUserGain(items, start, end) };
+}
+
+function balanced(items, start, end) {
+  if (items[end].balancedAfter === false) return false;
+  if (items[start].balancedBefore === false) return false;
+  return true;
+}
+
+export function selectCutIndexes(items, { engine = "cloud", chunkMin = 1000, chunkMax = 32000, maxEnd = null } = {}) {
+  if (!items?.length) return null;
+  const limit = maxEnd === null ? items.length - 1 : maxEnd;
+  if (limit < 0) return null;
+  const lastUser = items.reduce((found, item, index) => (item.type === "user" ? index : found), -1);
+  const firstUser = items.findIndex((item) => item.type === "user");
+  const floor = firstUser >= 0 ? firstUser + 1 : 0;
+  const oversized = [];
+  for (let index = limit; index >= 0; index -= 1) {
+    if ((items[index].tokens || 0) <= chunkMax || items[index].type !== "tool") continue;
+    if (engine === "local" && lastUser >= 0 && index <= lastUser) continue;
+    oversized.push(index);
+  }
+  let end = walkOffTail(items, limit);
+  if (end < 0) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
+  if (engine === "local") {
+    if (lastUser >= 0 && end <= lastUser) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
+    if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+    if ((items[end].tokens || 0) > chunkMax) return null;
+    const local = expandBack(items, end, Math.max(floor, lastUser), { crossUser: false, chunkMax });
+    if (local.gain < chunkMin || !balanced(items, local.start, local.end)) return null;
+    return local;
+  }
+  if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+  const phase = expandBack(items, end, 0, { crossUser: false, chunkMax });
+  if (phase.gain >= chunkMin) {
+    if (phase.tokens <= chunkMax && balanced(items, phase.start, phase.end) && !(lastUser >= phase.start && lastUser <= phase.end)) return phase;
+    return null;
+  }
+  end = retreatBefore(items, end, lastUser);
+  if (end < floor) return oversized.length ? { start: oversized[0], end: oversized[0], pointerOnly: true, gain: 0 } : null;
+  if ((items[end].tokens || 0) > chunkMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+  const extended = expandBack(items, end, floor - 1, { crossUser: true, chunkMax });
+  if (extended.start < floor) extended.start = floor;
+  extended.gain = nonUserGain(items, extended.start, extended.end);
+  extended.tokens = spanTokens(items, extended.start, extended.end);
+  if (extended.tokens > chunkMax || extended.gain < chunkMin || !balanced(items, extended.start, extended.end)) return null;
+  if (lastUser >= extended.start && lastUser <= extended.end) return null;
+  return extended;
+}
+
+// pointerOnly 扩到 tool-call 之后，这一段仍不能包含最后一条 user 或 checkpoint。
+// 本地整段必须严格晚于最后一条 user。较早的 user 可以留在段内，由卡片用 JSON 原文保住。
+export function pointerSpanAllowed(items, start, end, engine = "cloud") {
+  if (!Array.isArray(items) || !Number.isInteger(start) || !Number.isInteger(end)) return false;
+  if (start < 0 || end < start || end >= items.length) return false;
+  const lastUser = items.reduce((found, item, index) => (item?.type === "user" ? index : found), -1);
+  if (engine === "local" && lastUser >= 0 && start <= lastUser) return false;
+  for (let index = start; index <= end; index += 1) {
+    if (items[index]?.checkpoint) return false;
+    if (items[index]?.type === "user" && index === lastUser) return false;
+  }
+  return true;
+}
+
+export function pointerOnlyText(pieces) {
+  const tools = (pieces || []).filter((piece) => sourceRole(piece?.role) === "tool" && Number.isInteger(piece.seq));
+  const users = (pieces || []).filter((piece) => sourceRole(piece?.role) === "user" && String(piece.text || "").trim());
+  const lines = tools.map((piece) => {
+    const cmd = piece.command || piece.name || "tool";
+    const call = Number.isInteger(piece.callSeq) ? piece.callSeq : "?";
+    const flag = piece.isError ? " error" : "";
+    return `* ${piece.name || "tool"} "${cmd}" (seq ${call} -> result ${piece.seq}${flag})`;
+  });
+  const userBlock = users.length
+    ? [
+        "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
+        ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
+      ].join("\n")
+    : "";
+  return [lines.join("\n"), "序号是本会话日志里的事件号，不是备份文件路径。", userBlock, "本地备份不在这次请求里。"].filter(Boolean).join("\n");
+}
+
 export function reservedCutEnd(keepStart, first) {
   if (!Number.isInteger(keepStart) || keepStart <= first) return null;
   return keepStart - 1;
@@ -537,13 +738,8 @@ export function backupHint(shadowFile) {
 }
 
 export function attachBackupHint(card, shadowFile) {
-  if (!card?.needsBackup || !shadowFile) return card;
-  return {
-    ...card,
-    shadowFile,
-    backupId: shadowFile,
-    text: `${card.text}\n${backupHint(shadowFile)}`,
-  };
+  if (!card || !shadowFile) return card;
+  return { ...card, shadowFile, backupId: shadowFile };
 }
 
 export function withoutFullBackupClaim(text, shadowFile) {
@@ -657,11 +853,27 @@ function spanTurnRange(spans) {
 function pointerLines(spans) {
   const lines = [];
   for (const span of spans || []) {
-    if (sourceRole(span.role) !== "tool" || !span.toolCallId || span.inCut === false) continue;
-    if (span.raw) lines.push(pointerFor({ ...span.raw, toolCallId: span.raw.toolCallId || span.toolCallId }));
-    else if (span.pointer) lines.push(span.pointer);
+    if (sourceRole(span.role) !== "tool" || span.inCut === false) continue;
+    if (Number.isInteger(span.seq)) {
+      const cmd = span.command || span.name || "tool";
+      const call = Number.isInteger(span.callSeq) ? span.callSeq : "?";
+      const flag = span.isError ? " error" : "";
+      lines.push(`* ${span.name || "tool"} "${cmd}" (seq ${call} -> result ${span.seq}${flag})`);
+      continue;
+    }
+    if (span.raw && span.raw.ok === false && span.toolCallId) lines.push(`无完整备份 [${span.toolCallId}]`);
+    else if (span.pointer && !String(span.pointer).includes("/")) lines.push(span.pointer);
   }
   return lines.filter(Boolean);
+}
+
+function earlierUsers(spans) {
+  const users = (spans || []).filter((span) => sourceRole(span.role) === "user" && span.inCut !== false && String(span.text || "").trim());
+  if (!users.length) return "";
+  return [
+    "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
+    ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
+  ].join("\n");
 }
 
 // 一张卡片必须比被切掉的原文短，调用方会拒绝变长的结果。
@@ -719,6 +931,8 @@ export function buildCard(spanText, liveText = "", spans = null, extras = null) 
       ...(jobs.length === 0 ? ["- (none)"] : jobs.map((line) => `- ${line}`)),
       "原文指针:",
       ...(pointers.length === 0 ? ["- (none)"] : pointers.map((line) => `- ${line}`)),
+      "序号是本会话日志里的事件号，不是备份文件路径。",
+      earlierUsers(claims),
       "本地备份不在这次请求里。",
       tools.text,
     ].filter(Boolean).join("\n");

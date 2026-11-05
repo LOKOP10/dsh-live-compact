@@ -1,17 +1,18 @@
 {
   "name": "dsh-live-compact",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "In-place newest-turn compaction for DeepSeek Harness. Compress while the task runs and keep the prefix.",
   "license": "MIT",
   "type": "module",
   "main": "shell.js",
   "bin": {
-    "dsh-live-compact": "./bin/dsh-live-compact.js"
+    "dsh-live-compact": "bin/dsh-live-compact.js"
   },
   "exports": {
     ".": "./shell.js",
     "./engine": "./index.js",
-    "./gate": "./gate.js"
+    "./gate": "./gate.js",
+    "./shadow-search": "./shadow-search.js"
   },
   "files": [
     "shell.js",
@@ -20,6 +21,7 @@
     "plan.js",
     "raw.js",
     "shadow.js",
+    "shadow-search.js",
     "thunder.js",
     "bin",
     "cordis.patch.yml",

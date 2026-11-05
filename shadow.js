@@ -1,13 +1,14 @@
 /**
- * 备份文件。按会话分目录，默认上限 128MB，快满时删最老的。
- * Shadow files live in per-session directories. Default cap is 128MB; delete the oldest when nearly full.
+ * 备份文件。按会话分目录，默认上限 256MB，快满时删最老的。
+ * Shadow files live in per-session directories. Default cap is 256MB; delete the oldest when nearly full.
  *
  * 删除顺序：根目录旧文件，死会话，当前会话的旧文件。
  * 不删当前卡片指向的文件，也不删别的还活着的会话。ENOENT 当成已经删掉。
  * Delete legacy root files, then dead sessions, then old files of the current session.
  * Never delete the current card's file or another live session. ENOENT counts as already freed.
  */
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const PLUGIN_NAME = /^(?:(?:cut|official|shadow)-\d+-[0-9a-f]{8}|raw-[0-9a-f]{16}|\d+-[0-9a-f]{8}-[0-9a-f]{8}|\d+-[0-9a-f]{8,16})\.txt$/;
@@ -50,12 +51,60 @@ export function shadowFileBody(sessionKey, body) {
   return `# spine-session ${key}\n${body || ""}`;
 }
 
+export const STATS_NAME = "spine-stats.json";
+
+export function readCutStats(dir) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, STATS_NAME), "utf8"));
+    return {
+      cuts: Number(parsed.cuts) || 0,
+      savedTokens: Number(parsed.savedTokens) || 0,
+      rewriteTokens: Number(parsed.rewriteTokens) || 0,
+    };
+  } catch {
+    return { cuts: 0, savedTokens: 0, rewriteTokens: 0 };
+  }
+}
+
+export function recordCutStats(dir, { saved = 0, rewrite = 0 } = {}) {
+  if (!(saved > 0)) return readCutStats(dir);
+  try {
+    const file = join(dir, STATS_NAME);
+    const lock = join(dir, "spine-stats.lock");
+    const tmp = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
+    let fd;
+    try {
+      fd = openSync(lock, "wx");
+    } catch {
+      return null;
+    }
+    try {
+      const prev = readCutStats(dir);
+      const locked = {
+        cuts: prev.cuts + 1,
+        savedTokens: prev.savedTokens + saved,
+        rewriteTokens: prev.rewriteTokens + rewrite,
+        updatedAt: new Date().toISOString(),
+      };
+      writeFileSync(tmp, JSON.stringify(locked));
+      renameSync(tmp, file);
+      return locked;
+    } finally {
+      try { unlinkSync(tmp); } catch {}
+      closeSync(fd);
+      try { unlinkSync(lock); } catch {}
+    }
+  } catch {
+    return null;
+  }
+}
+
 export function shadowMaxBytes(env = process.env) {
   const bytes = Number(env.SPINE_SHADOW_MAX_BYTES);
   if (Number.isFinite(bytes) && bytes > 0) return Math.floor(bytes);
   const mb = Number(env.SPINE_SHADOW_MAX_MB);
   if (Number.isFinite(mb) && mb > 0) return Math.floor(mb * 1024 * 1024);
-  return 128 * 1024 * 1024;
+  return 256 * 1024 * 1024;
 }
 
 function readSessionKey(file) {

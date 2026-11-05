@@ -6,10 +6,12 @@
  * Notes follow UnwhiteCat's PR #3, rewritten for the current behavior.
  *
  * 小切在轮次结束后做，不调模型。最近 3 个已结束的工具轮留在原处。
- * 切点默认不越过用户消息；不够 1000 token 就跳过。超过 65 万停掉小切，交给官方大压缩。
+ * 本地切点不越过最后一条用户消息。云端最新一段不足 1000 时才跨较早的用户消息。
+ * 最后一条用户消息不进切段。不够 1000 token 就跳过。超过 65 万停掉小切，交给官方大压缩。
  * The small cut runs after the turn, with no model call. The latest 3 finished
- * tool rounds stay native. A cut does not cross a user message, and a span
- * under 1000 tokens is skipped. Above 650000, small cuts stop for the host gate.
+ * tool rounds stay native. Local cuts stay after the last user. Cloud may include
+ * earlier users only when the newest span is under 1000. The last user never
+ * enters a span. Under 1000 tokens, skip. Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -18,9 +20,9 @@ import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, chooseKeptSpan, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, RAIL_TOKENS, readResultLabel, reservedCutEnd, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, fallbackProviderURL, indexToolCalls, jobCutDecision, keptToolRounds, lookupProviderURL, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
-import { rotateShadow, sessionDir, shadowFileBody, shadowMaxBytes } from "./shadow.js";
+import { recordCutStats, rotateShadow, sessionDir, shadowFileBody, shadowMaxBytes } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 
 const MARK = "Spine extract.";
@@ -124,11 +126,15 @@ function shadowFilePath(requested, key) {
   return freshShadowFile("shadow", key);
 }
 
-// 从后往前选一刀。结尾跳过助手和很短的用户消息。起点不能落在用户消息或 checkpoint 上。
+// 从后往前选一刀。最后一条用户消息不进切段。云端最新一段不足 1000 时，较早的用户消息可以进卡片。
 // 工具对必须成对。最近 KEEP_ROUNDS 个已结束工具轮不进这刀。不够 CHUNK_MIN 就返回 null。
-// Pick one span from the tail. Skip assistant text and tiny user messages at the end.
-// Do not start on a user message or a checkpoint. Tool pairs stay balanced.
+// 单个超过 CHUNK_MAX 的工具结果只留指针，并连同对应 tool-call 一起替换。
+// 这段里不能有最后一条用户消息或 checkpoint。
+// Pick one span from the tail. The last user stays out. Cloud may card earlier users
+// only when the newest span is under 1000. Tool pairs stay balanced.
 // The newest KEEP_ROUNDS finished tool rounds stay out of the cut. Under CHUNK_MIN, return null.
+// One oversized tool result becomes a pointer and is replaced together with its tool-call.
+// That span must not contain the last user or a checkpoint.
 function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}) {
   const decision = jobCutDecision(context.jobs || []);
   if (!decision.cut) return null;
@@ -155,11 +161,7 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     visible.push({ index, type: event?.type === "tool/result" ? "tool" : "other", toolCalls });
   }
   const rounds = keptToolRounds(visible, KEEP_ROUNDS);
-  const span = chooseKeptSpan(rounds, (from, to) => {
-    let tokens = 0;
-    for (let index = visible[from.start].index; index <= visible[to.end].index; index += 1) tokens += priced[index].tokens;
-    return tokens;
-  }, KEEP_ROUND_TOKENS);
+  const span = rounds.length ? { start: rounds[0].start, end: rounds[rounds.length - 1].end } : null;
   const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;
   if (span && cutEnd === null) return null;
   if (cutEnd !== null) {
@@ -170,14 +172,17 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
   }
   if (end < first || isCheckpoint(session, nodes[end])) return null;
-  if (priced[end].tokens > CHUNK_MAX) return null;
   const spanPieces = (spanStart, spanEnd) => {
     const pieces = [];
     let pendingCommand = "";
+    const callSeqs = new Map();
     for (let index = 0; index < nodes.length; index += 1) {
       const event = session.eventAt(nodes[index]);
       const command = commandFromCall(event);
       if (command) pendingCommand = command;
+      for (const block of event?.data?.message?.content || []) {
+        if (block?.type === "tool-call" && block.id) callSeqs.set(block.id, nodes[index]);
+      }
       if (index < spanStart || index > spanEnd) continue;
       const toolCallId = event?.data?.message?.toolCallId || "";
       const call = toolCallId ? context.calls?.get?.(toolCallId) : null;
@@ -192,6 +197,8 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
         command: call?.command || (event?.type === "tool/result" ? pendingCommand : ""),
         name: call?.name || "",
         toolCallId,
+        seq: nodes[index],
+        callSeq: toolCallId ? callSeqs.get(toolCallId) : undefined,
         turn: Number.isInteger(event?.data?.turn) ? event.data.turn : call?.turn,
         backgroundStart: event?.type === "tool/result" && Boolean(backgroundJobId(text)),
         raw: looked ? (excerpt.raw?.ok ? excerpt.raw : { ok: false, toolCallId }) : undefined,
@@ -210,32 +217,60 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     return bits.join("\n");
   };
   const extras = { jobs: context.jobs || [] };
-  let start = end;
-  let tokens = priced[end].tokens;
-  let card = buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end), extras);
-  if (card.ok !== true) return null;
-  while (start > first) {
-    const prev = start - 1;
-    if (isCheckpoint(session, nodes[prev]) || isUser(session, nodes[prev])) break;
-    const nextTokens = tokens + priced[prev].tokens;
-    if (nextTokens > CHUNK_MAX) break;
-    const trial = buildCard(spanText(prev, end), liveText(prev, end), spanPieces(prev, end), extras);
-    if (trial.ok !== true) break;
-    tokens = nextTokens;
-    start = prev;
-    card = trial;
+  const items = nodes.map((seq, index) => {
+    const event = session.eventAt(seq);
+    const type = event?.type === "user/message" ? "user"
+      : event?.type === "assistant/message" ? "assistant"
+      : event?.type === "tool/result" ? "tool"
+      : event?.type === "system/message" ? "system" : "other";
+    return {
+      type,
+      tokens: priced[index].tokens,
+      checkpoint: isCheckpoint(session, seq),
+      balancedBefore: cutOk(toolPairingBalancedBefore, session, seq),
+      balancedAfter: cutOk(toolPairingBalancedAfter, session, seq),
+    };
+  });
+  const picked = selectCutIndexes(items, {
+    engine: context.engine || "cloud",
+    chunkMin: CHUNK_MIN,
+    chunkMax: CHUNK_MAX,
+    maxEnd: end,
+  });
+  if (!picked) return null;
+  if (picked.pointerOnly) {
+    const result = session.eventAt(nodes[picked.end]);
+    const id = result?.data?.message?.toolCallId;
+    let pairStart = -1;
+    if (id) {
+      for (let index = picked.end - 1; index >= 0; index -= 1) {
+        const blocks = session.eventAt(nodes[index])?.data?.message?.content || [];
+        if (blocks.some((block) => block?.type === "tool-call" && block.id === id)) {
+          pairStart = index;
+          break;
+        }
+      }
+    }
+    if (pairStart < 0) return null;
+    if (!pointerSpanAllowed(items, pairStart, picked.end, context.engine || "cloud")) return null;
+    if (!cutOk(toolPairingBalancedBefore, session, nodes[pairStart])) return null;
+    picked.start = pairStart;
   }
-  while (start <= end && (isCheckpoint(session, nodes[start]) || !cutOk(toolPairingBalancedBefore, session, nodes[start]))) {
-    tokens -= priced[start].tokens;
-    start += 1;
-  }
-  if (start > end || tokens < CHUNK_MIN || isCheckpoint(session, nodes[start])) return null;
-  card = attachBackupHint(buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end), extras), freshShadowFile("cut", key));
+  const start = picked.start;
+  end = picked.end;
+  const tokens = items.slice(start, end + 1).reduce((sum, item) => sum + item.tokens, 0);
+  let card = picked.pointerOnly
+    ? { ok: true, text: pointerOnlyText(spanPieces(start, end)), hardLines: [], missing: [], needsBackup: false, rawPaths: [] }
+    : buildCard(spanText(start, end), liveText(start, end), spanPieces(start, end), extras);
   if (card.ok !== true) return null;
+  card = attachBackupHint(card, freshShadowFile("cut", key));
+  if (!card.text.includes("不是备份文件路径")) card = { ...card, text: `${card.text}\n序号是本会话日志里的事件号，不是备份文件路径。` };
   if (!cutOk(toolPairingBalancedAfter, session, nodes[end])) return null;
   let after = 0;
   for (let index = end + 1; index < priced.length; index += 1) after += priced[index].tokens;
-  return { start: nodes[start], end: nodes[end], tokens, after, keptTokens, card };
+  let prefix = 0;
+  for (let index = 0; index < start; index += 1) prefix += priced[index].tokens;
+  return { start: nodes[start], end: nodes[end], tokens, after, keptTokens, card, prefix };
 }
 
 export { planMessages };
@@ -333,7 +368,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         this.ensurePruneGuard();
         this.captureSession(agent.session);
         const events = agent.session.snapshotEvents();
+        const resolved = this.engineFor(agent);
+        if (state.engine !== resolved.engine || state.engineSource !== resolved.source) {
+          this.ctx.logger?.info?.(`spine engine=${resolved.engine} source=${resolved.source}`);
+          state.engine = resolved.engine;
+          state.engineSource = resolved.source;
+        }
         const chunk = selectNewestChunk(agent.session, measurement, state.key, {
+          engine: resolved.engine,
           jobs: collectJobs(events),
           calls: indexToolCalls(events),
           rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
@@ -353,7 +395,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           await this.commitSelectedSpan(agent, chunk, op);
           const after = this.ctx.tokenMeter.measure(agent.session).totalTokens;
           reduced = after < before;
-          this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens}`);
+          const saved = before - after;
+          const stats = saved > 0 ? recordCutStats(shadowDirectory(), { saved, rewrite: Math.max(0, after - (chunk.prefix || 0)) }) : null;
+          const total = stats ? stats.savedTokens : "unknown";
+          this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved} total=${total}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.ctx.logger?.warn?.(`spine cut failed: ${message}`);
@@ -455,6 +500,21 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     state.localOnly = false;
     this.ensurePruneGuard();
     return super.compactIfNeeded(agent, trigger, signal);
+  }
+
+  engineFor(agent) {
+    const header = agent?.session?.requestHeader?.()?.config || {};
+    const context = agent?.session?.requestContext?.() || {};
+    const provider = header.provider || context.provider || "";
+    let baseURL = header.baseURL || context.baseURL || "";
+    if (!baseURL) {
+      try {
+        const listed = this.ctx.llm?.listProviders?.() || this.ctx.get?.("llm")?.listProviders?.() || [];
+        baseURL = lookupProviderURL(provider, listed);
+      } catch {}
+    }
+    if (!baseURL) baseURL = fallbackProviderURL(provider);
+    return resolveEngine({ provider, baseURL });
   }
 
   rawKey(session, toolCallId) {

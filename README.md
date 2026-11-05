@@ -75,6 +75,31 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 ![原版对比](docs/slide-stock.jpg)
 
+## 1.0.7 长填日志
+
+1.0.7 跑了同一套 8 组。真实 DeepSeek。184 个填日志回合都调用了工具。WARN 183/184，NOTICE 184/184，假 NOTICE 是 0。8 组都切过，一共 43 刀。卡片 43 张都有会话序号，没有备份路径。
+
+差的 1 题是第 7 组第 4 轮。文件读了，模型把 NOTICE 那一行也算进 WARN，报了 8，日志里是 7。
+
+![1.0.7 长填日志](docs/slide-107-fill.jpg)
+
+和已发布的 1.0.6 同一套题比：跳过工具都是 0。费用按离峰用量估算，1.0.7 是 $0.249，1.0.6 是 $0.211，不是账单。缓存命中 96.10%，上一轮 1.0.6 是 97.88%。题末上下文 1.0.7 平均 2.3 万、最高 3.1 万、最低 1.9 万，8 组都在 3.2 万以内。1.0.6 平均 2.6 万、最高 3.5 万。65 万停切线没动。
+
+![和 1.0.6 比](docs/slide-107-vs106.jpg)
+
+## 1.0.7 改了什么
+
+1.0.7 安装地址是新的。1.0.2 到 1.0.6 的旧包还在原来的链接上。
+
+- 云端和本地分开切。官方 DeepSeek 按公网地址切。服务商名含 strata，或地址是本机、私网、读不到，按本地切，不越过最后一条用户消息。
+- 最后一条用户消息不进切段。较早的用户原文写成单行 JSON，留在卡片里。
+- 卡片指针是会话日志的事件号，不写备份文件路径。最近 3 个已结束的工具轮仍留原文。
+- 单个超过 3.2 万 token 的工具结果只留序号指针，并连同对应调用一起换掉。
+- 备份默认上限 256MB。快满时仍删最老的。`SPINE_SHADOW_MAX_BYTES` 和 `SPINE_SHADOW_MAX_MB` 还能改。
+- 切完可看累计：`dsh-live-compact stats`。估算按未命中输入 $0.15/M，不扣重写成本。
+- 当前会话备份可以另查：`import { searchShadow } from "dsh-live-compact/shadow-search"`。插件自己不会去搜。
+- 65 万停切线没改。
+
 ## 1.0.6 改了什么
 
 1.0.6 安装地址是新的。1.0.2、1.0.3、1.0.4、1.0.5 的旧包还在原来的链接上。
@@ -128,19 +153,19 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless 直接切。网页和 Desktop 装上这一版后，四个预设会在加载时换成这个包。见 [#5](https://github.com/MerkyorLynn/dsh-live-compact/issues/5)。TUI 仍换不掉，先不要装。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
 ```
 
 网页和 Desktop 用对应的 profile 装同一个包：
 
 ```sh
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz
 ```
 
 和 CLI 一样，也可以先装到本机再看版本：
 
 ```sh
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.6.tgz"
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.7.tgz"
 dsh-live-compact --version
 ```
 
@@ -148,7 +173,7 @@ dsh-live-compact --version
 
 DSH-TUI 同样换不掉预设里的原版压缩，先不要装。
 
-被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。上限 128MB。快满时删最老的备份。
+被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。上限 256MB。快满时删最老的备份。卡片里的序号是会话日志的事件号。要在当前会话的备份里找一行，用 `import { searchShadow } from "dsh-live-compact/shadow-search"`。
 
 改上限：
 
