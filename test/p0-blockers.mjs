@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import {
   buildCard,
+  catalogProviderURL,
   fallbackProviderURL,
+  providerURLFromConfig,
+  providerURLFromLayers,
+  providerURLFromPatch,
   resolveEngine,
+  resolveProviderBaseURL,
   selectCutIndexes,
 } from "../plan.js";
 
@@ -35,6 +40,81 @@ check("p0 official DeepSeek is cloud when the header has no URL", () => {
   assert.equal(resolveEngine({ provider: "deepseek-official", baseURL }).engine, "cloud");
   assert.equal(resolveEngine({ provider: "deepseek", baseURL: fallbackProviderURL("deepseek") }).engine, "cloud");
   assert.equal(resolveEngine({ provider: "custom", baseURL: "" }).engine, "local");
+});
+
+check("p0 a configured public provider is cloud when the header has no URL", () => {
+  const patch = `
+providers:
+  local-box:
+    baseURL: http://127.0.0.1:19420
+  zhipu-coding:
+    displayName: Zhipu Coding Plan
+    baseURL: https://open.bigmodel.cn/api/coding/paas/v4
+  other:
+    baseURL: http://10.0.0.8:9
+`;
+  const config = {
+    config: {
+      providers: {
+        "zhipu-coding": { baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" },
+        "local-box": { baseURL: "http://127.0.0.1:19420" },
+      },
+    },
+  };
+  assert.equal(providerURLFromPatch(patch, "zhipu-coding"), "https://open.bigmodel.cn/api/coding/paas/v4");
+  assert.equal(providerURLFromPatch(patch, "local-box"), "http://127.0.0.1:19420");
+  assert.equal(providerURLFromPatch(patch, "missing"), "");
+  assert.equal(providerURLFromConfig(config, "zhipu-coding"), "https://open.bigmodel.cn/api/coding/paas/v4");
+  const cloud = resolveProviderBaseURL({ provider: "zhipu-coding", patchText: patch });
+  const local = resolveProviderBaseURL({ provider: "local-box", config });
+  assert.equal(resolveEngine({ provider: "zhipu-coding", baseURL: cloud }).engine, "cloud");
+  assert.equal(resolveEngine({ provider: "local-box", baseURL: local }).engine, "local");
+  assert.equal(resolveProviderBaseURL({
+    provider: "zhipu-coding",
+    headerURL: "http://127.0.0.1:9",
+    patchText: patch,
+  }), "http://127.0.0.1:9");
+  assert.equal(resolveProviderBaseURL({ provider: "custom" }), "");
+  assert.equal(resolveEngine({ provider: "custom", baseURL: "" }).engine, "local");
+  assert.equal(providerURLFromLayers([
+    {
+      override: { providers: { other: { baseURL: "http://10.0.0.8:9" } } },
+      inherited: { providers: { "zhipu-coding": { baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" } } },
+    },
+  ], "zhipu-coding"), "");
+  const inline = `providers:\n  my-glm: { baseURL: https://example.test/v1, api: openai-completions }\n  desk: { baseURL: http://192.168.1.9:8080 }\n`;
+  assert.equal(providerURLFromPatch(inline, "my-glm"), "https://example.test/v1");
+  assert.equal(resolveEngine({ provider: "my-glm", baseURL: providerURLFromPatch(inline, "my-glm") }).engine, "cloud");
+  assert.equal(resolveEngine({ provider: "desk", baseURL: providerURLFromPatch(inline, "desk") }).engine, "local");
+  assert.equal(resolveProviderBaseURL({
+    provider: "deepseek-official",
+    config: { providers: { "deepseek-official": { baseURL: "http://127.0.0.1:8080" } } },
+  }), "http://127.0.0.1:8080");
+  assert.equal(resolveEngine({
+    provider: "deepseek-official",
+    baseURL: resolveProviderBaseURL({
+      provider: "deepseek-official",
+      config: { providers: { "deepseek-official": { baseURL: "http://127.0.0.1:8080" } } },
+    }),
+  }).engine, "local");
+  assert.equal(catalogProviderURL("openai", [{ id: "openai", baseURL: "https://api.openai.com/v1" }]), "https://api.openai.com/v1");
+  assert.equal(resolveProviderBaseURL({
+    provider: "openai",
+    catalog: [{ id: "openai", baseUrl: "https://api.openai.com/v1" }],
+  }), "https://api.openai.com/v1");
+  assert.equal(resolveEngine({
+    provider: "openai",
+    baseURL: resolveProviderBaseURL({
+      provider: "openai",
+      catalog: [{ id: "openai", baseURL: "https://api.openai.com/v1" }],
+    }),
+  }).engine, "cloud");
+  assert.equal(resolveProviderBaseURL({
+    provider: "openai",
+    config: { providers: { openai: { baseURL: "http://10.1.2.3:9" } } },
+    catalog: [{ id: "openai", baseURL: "https://api.openai.com/v1" }],
+  }), "http://10.1.2.3:9");
+  assert.equal(resolveEngine({ provider: "strata-box", baseURL: "https://api.example.com" }).engine, "local");
 });
 
 check("p0 numbered heartbeat log can be cut", () => {

@@ -13,13 +13,15 @@
  * Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, fallbackProviderURL, indexToolCalls, jobCutDecision, keptToolRounds, lookupProviderURL, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   discardShadowFiles,
@@ -629,21 +631,90 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     return super.compactIfNeeded(agent, trigger, signal);
   }
 
-  // 请求头往往只有 provider。先读目录里的地址，再对官方 DeepSeek 用公网默认端点。
-  // Headers often carry only the provider. Read a catalog URL, then use the public DeepSeek endpoint.
+  // 请求头往往只有 provider。目录和官方 DeepSeek 之后，再读当前配置里的 baseURL。
+  // 读不到地址仍按本地，避免没配地址的会话被当成云端去改前缀。
+  // Headers often carry only the provider. After the catalog and official DeepSeek, read the live profile URL.
+  // No URL still means local, so an unconfigured session is not rewritten as cloud.
   engineFor(agent) {
     const header = agent?.session?.requestHeader?.()?.config || {};
     const context = agent?.session?.requestContext?.() || {};
     const provider = header.provider || context.provider || "";
-    let baseURL = header.baseURL || context.baseURL || "";
-    if (!baseURL) {
+    const listed = this.listedProviders();
+    const baseURL = resolveProviderBaseURL({
+      provider,
+      headerURL: header.baseURL || context.baseURL || "",
+      listed,
+      layers: this.providerLayers(),
+      patchText: this.profilePatchText(),
+      catalog: this.catalogProviders(),
+    });
+    return resolveEngine({ provider, baseURL });
+  }
+
+  listedProviders() {
+    try {
+      return this.ctx.llm?.listProviders?.() || this.ctx.get?.("llm")?.listProviders?.() || [];
+    } catch {
+      return [];
+    }
+  }
+
+  hostService(name) {
+    const nodes = [this.ctx, this.ctx?.root, this.ctx?.parent];
+    for (const node of nodes) {
+      if (!node || typeof node.get !== "function") continue;
       try {
-        const listed = this.ctx.llm?.listProviders?.() || this.ctx.get?.("llm")?.listProviders?.() || [];
-        baseURL = lookupProviderURL(provider, listed);
+        const hit = node.get(name);
+        if (hit) return hit;
       } catch {}
     }
-    if (!baseURL) baseURL = fallbackProviderURL(provider);
-    return resolveEngine({ provider, baseURL });
+    return undefined;
+  }
+
+  providerLayers() {
+    try {
+      const rows = this.hostService("configEditor")?.configuration?.() || [];
+      return rows.map((row) => ({ override: row?.override, inherited: row?.inherited }));
+    } catch {
+      return [];
+    }
+  }
+
+  catalogProviders() {
+    const anchors = [import.meta.url];
+    try {
+      if (process.argv[1]) anchors.push(pathToFileURL(process.argv[1]).href);
+    } catch {}
+    for (const anchor of anchors) {
+      try {
+        const loaded = createRequire(anchor)("@earendil-works/pi-ai/providers/all");
+        const list = typeof loaded.builtinProviders === "function" ? loaded.builtinProviders() : [];
+        return list.map((entry) => ({
+          id: entry?.id || "",
+          baseURL: entry?.baseUrl || entry?.baseURL || "",
+        })).filter((entry) => entry.id && entry.baseURL);
+      } catch {}
+    }
+    return [];
+  }
+
+  profilePatchText() {
+    const candidates = [];
+    try {
+      const profile = this.hostService("profileContext");
+      if (profile?.patchPath) candidates.push(profile.patchPath);
+      if (profile?.dir) candidates.push(join(profile.dir, "cordis.patch.yml"));
+    } catch {}
+    const home = process.env.DSH_HOME;
+    const flag = process.argv.indexOf("--profile");
+    const name = flag >= 0 ? process.argv[flag + 1] : process.env.DSH_PROFILE;
+    if (home && name && !String(name).startsWith("-")) candidates.push(join(home, "profiles", name, "cordis.patch.yml"));
+    for (const path of candidates) {
+      try {
+        if (path && existsSync(path)) return readFileSync(path, "utf8");
+      } catch {}
+    }
+    return "";
   }
 
   rawKey(session, toolCallId) {

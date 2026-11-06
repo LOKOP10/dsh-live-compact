@@ -96,7 +96,27 @@ dsh-live-compact --version
 
 官方大压缩的三项预设参数可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认不动，仍是 `0.8`、`65536`、`8192`，不按地址自动改小。TUI 的 `/settings` 目前没有这一项。
 
-发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。Pi 移植不在这道门禁里。不过不能发。
+请求头通常只有 provider 名。云端和本地按这一家的地址区分：当前配置里的 `baseURL` 优先，没有再看官方 DeepSeek 和内置目录。公网地址按云端切，回环和内网按本地。读不到地址仍按本地，不猜。这不改官方大门的 headroom。`SPINE_ENGINE=local` 或 `cloud` 仍可强制指定。
+
+发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。Pi 移植不在这道门禁里。
+
+## 1.0.9 测评
+
+云端看题对不对，以及每轮第一个 `step_end` 的缓存命中 `cacheRead / (cacheRead + input)`。本地不看缓存命中，看题对不对和切掉的 token。切掉是 `shadowedTokenCount`。费用是离峰用量估算，不是账单。
+
+DS V4.1 Flash，8 组 31 轮。184/184，跳过 0。缓存命中 98.22%。题末最高 35334，平均 28984。切掉 97306。估算费用 $0.208。
+
+GLM 5.3 Flash，同一套 8 组。184/184，跳过 0。同一公式缓存命中 74.66%。第 6、8 组几乎每轮只 `read` 一次全文，刀落在三轮以前的那份全文上，前缀被改写。切掉 481483。这是模型用法，规则没有为它改。
+
+Coder 390 27B，只跑了 3 组 31 轮，没有八组并行。填日志 69/69。切掉 20635，都在第 30 轮：组 1 是 10503，组 2 是 5106，组 3 是 5026。墙钟 29 分、20 分、86 分。
+
+![汇总分题](docs/slide-109-by-question.jpg)
+
+![DS V4.1 Flash](docs/slide-109-ds.jpg)
+
+![GLM 5.3 Flash](docs/slide-109-glm.jpg)
+
+![Coder 390 27B](docs/slide-109-390.jpg)
 
 `cordis.patch.yml` 是静态整块替换，不读这三个环境变量。要在这里改 `headroomTokens`，需直接改配置块，例如：
 
@@ -228,8 +248,8 @@ dsh-live-compact --version
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.0.8
-dsh plugin --profile web add dsh-live-compact@1.0.8
+dsh plugin --profile headless add dsh-live-compact@1.0.9
+dsh plugin --profile web add dsh-live-compact@1.0.9
 ```
 
 想先装到本机看版本：
@@ -239,12 +259,12 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.7 的旧链接仍在。
+备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.8 的旧链接仍在。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.8.tgz"
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz"
 dsh-live-compact --version
 ```
 

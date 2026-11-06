@@ -581,6 +581,144 @@ export function fallbackProviderURL(provider) {
   return "";
 }
 
+function recordOf(value) {
+  if (!value || typeof value !== "object") return null;
+  if (typeof value.get === "function") {
+    try {
+      const got = value.get();
+      if (got && typeof got === "object" && !Array.isArray(got)) return got;
+    } catch {}
+  }
+  return Array.isArray(value) ? null : value;
+}
+
+function urlFromProfile(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  return String(profile.baseURL || profile.defaultBaseURL || "");
+}
+
+// 配置树里按 provider 名取 baseURL。只认这一家，不拿别家的地址。
+// Read one provider's baseURL from a config tree. Do not borrow another provider's URL.
+export function providerURLFromConfig(config, provider) {
+  const name = String(provider || "");
+  if (!name || config == null) return "";
+  if (Array.isArray(config)) {
+    for (const item of config) {
+      const url = providerURLFromConfig(item, provider);
+      if (url) return url;
+    }
+    return "";
+  }
+  const node = recordOf(config);
+  if (!node) return "";
+  const providers = node.providers;
+  if (Array.isArray(providers)) {
+    const hit = providers.find((item) => item?.provider === name || item?.id === name || item?.name === name);
+    if (hit) return urlFromProfile(hit);
+  }
+  const providerMap = recordOf(providers);
+  if (providerMap && Object.prototype.hasOwnProperty.call(providerMap, name)) return urlFromProfile(providerMap[name]);
+  const nested = [];
+  if (Array.isArray(node.config)) nested.push(...node.config);
+  else if (node.config && typeof node.config === "object") nested.push(node.config);
+  if (Array.isArray(node.plugins)) nested.push(...node.plugins);
+  for (const child of nested) {
+    const url = providerURLFromConfig(child, provider);
+    if (url) return url;
+  }
+  return "";
+}
+
+// 当前层如果写了 providers，就以这一层为准，不再回退到继承配置。
+// A layer that declares providers owns that dict. Do not fall through to inherited values.
+export function providerURLFromLayers(layers, provider) {
+  for (const layer of layers || []) {
+    const override = layer?.override;
+    const inherited = layer?.inherited;
+    if (override && recordOf(override)?.providers) {
+      const url = providerURLFromConfig(override, provider);
+      if (url) return url;
+      continue;
+    }
+    const url = providerURLFromConfig(override, provider) || providerURLFromConfig(inherited, provider);
+    if (url) return url;
+  }
+  return "";
+}
+
+// 从配置文件文本里取这一家的 baseURL。缩进结束即停，避免读到下一家。
+// Read one provider's baseURL from patch text. Stop when the indent ends.
+function urlOnLine(line) {
+  const url = String(line || "").match(/\bbaseURL:\s*["']?([^\s,"'}#]+)/);
+  return url ? url[1].replace(/[,}]+$/, "") : "";
+}
+
+export function providerURLFromPatch(text, provider) {
+  const name = String(provider || "");
+  if (!name || !text) return "";
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const inline = new RegExp(`^\\s*["']?${escaped}["']?:\\s*\\{([^}]*)\\}`);
+  const key = new RegExp(`^(\\s*)["']?${escaped}["']?:\\s*(?:\\|.*|#.*)?$`);
+  const lines = String(text).split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const inlineMatch = lines[index].match(inline);
+    if (inlineMatch) {
+      const url = urlOnLine(inlineMatch[1]);
+      if (url) return url;
+    }
+    const match = lines[index].match(key);
+    if (!match) continue;
+    const indent = match[1].length;
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next];
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const lead = line.match(/^(\s*)/)[1].length;
+      if (lead <= indent) break;
+      const url = urlOnLine(line);
+      if (url) return url;
+    }
+  }
+  return "";
+}
+
+// 内置目录只在这家没有自己的地址时使用。调用方传入 {id, baseURL}，这里不读包。
+// Use a built-in catalog URL only when this provider has no URL of its own.
+export function catalogProviderURL(provider, catalog) {
+  const name = String(provider || "");
+  if (!name || !catalog) return "";
+  const list = Array.isArray(catalog) ? catalog : [];
+  const match = list.find((entry) => entry?.id === name || entry?.provider === name);
+  return String(match?.baseURL || match?.baseUrl || "");
+}
+
+// 请求头优先。然后是当前配置里这一家的地址，这样 BYOK 指向内网时不会被官方默认地址盖掉。
+// 配置没有时才用官方 DeepSeek 和内置目录。仍然没有就空，调用方按本地处理。
+// The header wins. Then this provider's configured URL, so a BYOK private endpoint is not replaced by a public default.
+// Official DeepSeek and the built-in catalog apply only when the profile has no URL. Empty stays unresolved.
+export function resolveProviderBaseURL({
+  provider = "",
+  headerURL = "",
+  listed = [],
+  layers = [],
+  config = null,
+  patchText = "",
+  catalog = [],
+} = {}) {
+  const header = String(headerURL || "");
+  if (header) return header;
+  const listedURL = lookupProviderURL(provider, listed);
+  if (listedURL) return listedURL;
+  const fromLayers = providerURLFromLayers(layers, provider);
+  if (fromLayers) return fromLayers;
+  const fromConfig = providerURLFromConfig(config, provider);
+  if (fromConfig) return fromConfig;
+  const fromPatch = providerURLFromPatch(patchText, provider);
+  if (fromPatch) return fromPatch;
+  const fallback = fallbackProviderURL(provider);
+  if (fallback) return fallback;
+  return catalogProviderURL(provider, catalog);
+}
+
 export function resolveEngine({ provider = "", baseURL = "", env = process.env } = {}) {
   const override = String(env.SPINE_ENGINE || "").trim().toLowerCase();
   if (override === "local" || override === "cloud") return { engine: override, source: "env" };
