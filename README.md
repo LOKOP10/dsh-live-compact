@@ -6,6 +6,14 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 
 为什么非要等到 80%？边做边压不行吗？
 
+## 云端和端侧
+
+云端（公网地址，如 DeepSeek、GLM）：装上即可。不要设置 `SPINE_THUNDER`。看题对不对，以及缓存命中。切点前面的原文不动。
+
+端侧（本机、内网、27B）：也可以装。不要设置 `SPINE_THUNDER`。不要拿云端缓存命中来要求它。看题对不对，以及切掉多少 token。本地服务没有云端那种前缀缓存，每次提问都会把当前上下文重新预填充。两万多是当前上下文的大小，不是插件没切。
+
+`SPINE_THUNDER` 默认关闭。只有设为 `1` 才走雷霆。再设 `SPINE_THUNDER_MODEL=27b` 时，前缀超过 8 万会每次都少发，一次雷霆变成次次雷霆。端侧不要开。
+
 超过 2 万 token 就切一刀。切的是刚结束的这一轮，不调用模型。切点前面的原文不动，缓存命中还是原来的水准。上下文因此一直被按在较低的位置。雷霆大压缩能拖就拖，拖到尽可能后面。就算哪天满了、真的触发了，掉下来之后小切还在，不会很快又堆回去。
 
 headless：
@@ -221,8 +229,8 @@ dsh-live-compact --version
 | `SPINE_SHADOW_MAX_BYTES` | 268435456 | 正数直接作为备份字节上限，优先于 `SPINE_SHADOW_MAX_MB`。 |
 | `SPINE_SHADOW_MAX_MB` | 256 | 未设置正数字节上限时，按 MB 设置备份上限。 |
 | `SPINE_ENGINE` | 自动识别 | 设为 `cloud` 或 `local` 可强制切法，其他值忽略。 |
-| `SPINE_THUNDER` | 关闭 | 设为 `1` 时启用雷霆摘要路径。 |
-| `SPINE_THUNDER_MODEL` | `flash` | 设为 `27b` 时使用对应模型类型，其他值仍为 `flash`。 |
+| `SPINE_THUNDER` | 关闭 | 设为 `1` 才走雷霆。端侧不要开。 |
+| `SPINE_THUNDER_MODEL` | `flash` | 设为 `27b` 且前缀超过 8 万时，每次官方压缩都少发。端侧不要设。 |
 | `SPINE_ENGINE_FAIL` | 无 | **仅供测试**：用 `import`、`construct`、`after-super` 注入引擎故障。 |
 | `SPINE_STOCK_FAIL` | 无 | **仅供测试**：设为 `1` 时禁止回退原版引擎。 |
 | `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
