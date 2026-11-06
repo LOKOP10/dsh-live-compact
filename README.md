@@ -27,6 +27,22 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
+## 1.0.9
+
+1. 云端和本地按当前配置里这一家的地址区分。请求头通常只有 provider 名。配置里的 `baseURL` 优先，没有再看官方 DeepSeek 和内置目录。公网地址按云端切，回环和内网按本地。读不到地址仍按本地。`SPINE_ENGINE=local` 或 `cloud` 可以强制指定。这不改官方大门的 headroom。
+2. 官方大压缩的三项可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认仍是 `0.8`、`65536`、`8192`，不按地址改小。TUI 的 `/settings` 没有这一项。要改当前配置，直接改 `cordis.patch.yml` 里的对应字段。
+3. 发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。
+4. 测评分两个口径。云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。本地看题对不对和切掉的 token。DS V4.1 Flash，8 组，184/184，跳过 0，缓存 98.22%，题末最高 35334，切掉 97306，估算费用 $0.208。GLM 5.3 Flash，同一套 8 组，184/184，同一公式缓存 74.66%。Coder 390 27B，3 组 31 轮，填日志 69/69，切掉 20635。费用是离峰用量估算，不是账单。
+5. 安装用 npm 的 `dsh-live-compact@1.0.9`。上不了 npm 时用镜像包 https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz 。页面在 https://download.merkyorlynn.com/live-compact.html 。
+
+![汇总分题](docs/slide-109-by-question.jpg)
+
+![DS V4.1 Flash](docs/slide-109-ds.jpg)
+
+![GLM 5.3 Flash](docs/slide-109-glm.jpg)
+
+![Coder 390 27B](docs/slide-109-390.jpg)
+
 ![边做边压](docs/slide-cover.jpg)
 
 ![为什么非要等到 80%](docs/slide-why.jpg)
@@ -91,32 +107,6 @@ dsh-live-compact --version
 同一套题又跑了原版官方压缩。分数一样，费用一样，上下文更低。跳过工具两边都是 0，WARN 和 NOTICE 都是 184/184。费用按离峰用量估算，插件 $0.211，原版 $0.229，不是账单。题末上下文插件平均 2.6 万、最高 3.5 万；原版平均 4.4 万、最高 12.6 万。插件 8 组都在 3.5 万以内，原版有两组到了 8.0 万和 12.6 万。
 
 ![原版对比](docs/slide-stock.jpg)
-
-## 1.0.9
-
-官方大压缩的三项预设参数可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认不动，仍是 `0.8`、`65536`、`8192`，不按地址自动改小。TUI 的 `/settings` 目前没有这一项。
-
-请求头通常只有 provider 名。云端和本地按这一家的地址区分：当前配置里的 `baseURL` 优先，没有再看官方 DeepSeek 和内置目录。公网地址按云端切，回环和内网按本地。读不到地址仍按本地，不猜。这不改官方大门的 headroom。`SPINE_ENGINE=local` 或 `cloud` 仍可强制指定。
-
-发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。Pi 移植不在这道门禁里。
-
-## 1.0.9 测评
-
-云端看题对不对，以及每轮第一个 `step_end` 的缓存命中 `cacheRead / (cacheRead + input)`。本地不看缓存命中，看题对不对和切掉的 token。切掉是 `shadowedTokenCount`。费用是离峰用量估算，不是账单。
-
-DS V4.1 Flash，8 组 31 轮。184/184，跳过 0。缓存命中 98.22%。题末最高 35334，平均 28984。切掉 97306。估算费用 $0.208。
-
-GLM 5.3 Flash，同一套 8 组。184/184，跳过 0。同一公式缓存命中 74.66%。第 6、8 组几乎每轮只 `read` 一次全文，刀落在三轮以前的那份全文上，前缀被改写。切掉 481483。这是模型用法，规则没有为它改。
-
-Coder 390 27B，只跑了 3 组 31 轮，没有八组并行。填日志 69/69。切掉 20635，都在第 30 轮：组 1 是 10503，组 2 是 5106，组 3 是 5026。墙钟 29 分、20 分、86 分。
-
-![汇总分题](docs/slide-109-by-question.jpg)
-
-![DS V4.1 Flash](docs/slide-109-ds.jpg)
-
-![GLM 5.3 Flash](docs/slide-109-glm.jpg)
-
-![Coder 390 27B](docs/slide-109-390.jpg)
 
 `cordis.patch.yml` 是静态整块替换，不读这三个环境变量。要在这里改 `headroomTokens`，需直接改配置块，例如：
 
