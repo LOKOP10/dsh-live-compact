@@ -11,13 +11,13 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.0.6
+dsh plugin --profile headless add dsh-live-compact@1.0.9
 ```
 
 网页和桌面端（共用 web profile，装一次两边都生效）：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.0.6
+dsh plugin --profile web add dsh-live-compact@1.0.9
 ```
 
 想先装到本机看版本：
