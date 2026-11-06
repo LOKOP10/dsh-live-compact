@@ -94,6 +94,22 @@ check("p0 cloud ordinary turn does not cut history", () => {
   assert.equal(selectCutIndexes(items, { engine: "cloud", drain: false, totalTokens: 40000 }), null);
 });
 
+check("p0 cloud at 200000 still selects an old tool without a prior growth record", () => {
+  const items = [];
+  for (let index = 0; index < 6; index += 1) {
+    items.push({ type: "user", tokens: 40 });
+    items.push({ type: "tool", tokens: 12000 });
+  }
+  const cut = selectCutIndexes(items, {
+    engine: "cloud",
+    drain: false,
+    totalTokens: 200000,
+    maxEnd: 5,
+  });
+  assert.ok(cut);
+  assert.equal(cut.end <= 5, true);
+});
+
 check("p0 drain still selects a cut when context is 200000", () => {
   const items = [];
   for (let index = 0; index < 6; index += 1) items.push({ type: "tool", tokens: 15000 });

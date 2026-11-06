@@ -6,12 +6,11 @@
  * Notes follow UnwhiteCat's PR #3, rewritten for the current behavior.
  *
  * 小切在轮次结束后做，不调模型。最近 3 个已结束的工具轮留在原处。
- * 切法和 1.0.6 一样：不越过用户消息，最近的工具轮按原预算留在原处。
- * 不够 1000 token 就跳过，不回头凑。超过 65 万停掉小切，交给官方大压缩。
- * The small cut runs after the turn, with no model call. The cut matches 1.0.6:
- * it does not cross a user message, and recent tool rounds stay within the
- * original token budget. Under 1000 tokens, skip. Do not walk back to manufacture
- * a cut. Above 650000, small cuts stop for the host gate.
+ * 切法和 1.0.6 一样：不越过用户消息。不够 1000 token 就跳过，不回头凑。
+ * 超过 65 万停掉小切，交给官方大压缩。
+ * The small cut runs after the turn, with no model call. It does not cross a user
+ * message. Under 1000 tokens, skip. Do not walk back to manufacture a cut.
+ * Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -20,7 +19,7 @@ import { join } from "node:path";
 import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, chooseKeptSpan, collectJobs, fallbackProviderURL, indexToolCalls, jobCutDecision, keptToolRounds, lookupProviderURL, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, fallbackProviderURL, indexToolCalls, jobCutDecision, keptToolRounds, lookupProviderURL, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   discardShadowFiles,
@@ -223,9 +222,9 @@ export function saveShadowImpl(
 export { saveShadowImpl as saveShadow };
 
 // 从后往前选一刀，和 1.0.6 一样。不越过用户消息。工具对必须成对。
-// 最近的工具轮按 KEEP_ROUND_TOKENS 留在原处。不够 CHUNK_MIN 就返回 null。
+// 最近 KEEP_ROUNDS 个已结束的工具轮留在原处。不够 CHUNK_MIN 就返回 null。
 // Pick one span from the tail, as in 1.0.6. Do not cross a user message.
-// Tool pairs stay balanced. Recent tool rounds stay within KEEP_ROUND_TOKENS.
+// Tool pairs stay balanced. The newest KEEP_ROUNDS finished rounds stay verbatim.
 // Under CHUNK_MIN, return null.
 function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}) {
   const decision = jobCutDecision(context.jobs || []);
@@ -253,21 +252,7 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     visible.push({ index, type: event?.type === "tool/result" ? "tool" : "other", toolCalls });
   }
   const rounds = keptToolRounds(visible, KEEP_ROUNDS);
-  // 收尾也留最近的工具轮。保留额度要扣掉轮次之前的前缀，否则前缀加满额会停在 32000 以上。
-  // Drain still keeps the newest rounds. Their budget is the 32000 stop minus the prefix ahead of them.
-  let headTokens = 0;
-  if (context.drain && rounds.length) {
-    const headEnd = visible[rounds[0].start].index;
-    for (let index = 0; index < headEnd; index += 1) headTokens += priced[index].tokens;
-  }
-  const keepBudget = context.drain
-    ? Math.max(0, KEEP_ROUND_TOKENS - headTokens)
-    : KEEP_ROUND_TOKENS;
-  const span = chooseKeptSpan(rounds, (from, to) => {
-    let tokens = 0;
-    for (let index = visible[from.start].index; index <= visible[to.end].index; index += 1) tokens += priced[index].tokens;
-    return tokens;
-  }, keepBudget);
+  const span = rounds.length ? { start: rounds[0].start, end: rounds.at(-1).end } : null;
   const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;
   if (span && cutEnd === null) return null;
   if (cutEnd !== null) {
@@ -346,7 +331,6 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     totalTokens: context.totalTokens,
     drain: context.drain === true,
     urgentTokens: URGENT_TOKENS,
-    keepBudget: KEEP_ROUND_TOKENS,
   });
   if (!picked) return null;
   if (picked.pointerOnly) {
@@ -496,13 +480,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           state.engineSource = resolved.source;
         }
         const cloud = resolved.engine !== "local";
-        // 预测下一轮会过 32000 才收尾。实际总量回到 32000 就停，不收到 16000。
-        // Drain when the next request would pass 32000. Stop at the measured 32000. Do not cut down to 16000.
+        // 预测下一轮会过 32000 时收尾；没有增长基线时仍由已有 48000 紧急线接管。
+        // Drain a projected request over 32000. Without a growth baseline, the existing 48000 urgent line still takes over.
         const last = measurement.totalTokens;
         const base = state.turnBase ?? last;
         const growth = Math.max(0, last - base);
         state.maxTurnGrowth = Math.max(state.maxTurnGrowth || 0, growth);
-        let drain = cloud && last + state.maxTurnGrowth > KEEP_ROUND_TOKENS;
+        const projected = state.maxTurnGrowth > 0 && last + state.maxTurnGrowth > KEEP_ROUND_TOKENS;
+        const drain = cloud && (projected || last >= URGENT_TOKENS);
         for (let pass = 0; pass < 8; pass += 1) {
           const measured = this.ctx.tokenMeter.measure(agent.session);
           if (drain && measured.totalTokens <= KEEP_ROUND_TOKENS) break;

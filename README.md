@@ -96,7 +96,7 @@ dsh-live-compact --version
 
 官方大压缩的三项预设参数可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认不动，仍是 `0.8`、`65536`、`8192`，不按地址自动改小。TUI 的 `/settings` 目前没有这一项。
 
-发版门禁是 `npm run test:gate`。它覆盖这些阻断：官方 DeepSeek 没地址时仍是云端、本地切点不跨最后一条用户、不穿过已有卡片去凑切点、云端平时不切、收尾时 20 万上下文仍要选出切点、520 行编号心跳日志可以切、心跳行里的地区编号没留下就取消这一刀。Pi 移植不在这道门禁里。不过不能发。
+发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。Pi 移植不在这道门禁里。不过不能发。
 
 `cordis.patch.yml` 是静态整块替换，不读这三个环境变量。要在这里改 `headroomTokens`，需直接改配置块，例如：
 
@@ -206,7 +206,7 @@ dsh-live-compact --version
 | `SPINE_POINTER_TOKENS` | `SPINE_CHUNK_MAX`（默认 32000） | 单个工具结果超过此 token 数才只留指针。 |
 | `SPINE_MIN_TOKENS` | 20000 | 轮后小切的最低上下文 token 数。 |
 | `SPINE_KEEP_ROUNDS` | 3 | 原处保留的最近已结束工具轮数。 |
-| `SPINE_KEEP_ROUND_TOKENS` | 32000 | 最近工具轮的保留预算，也是云端收尾的停止线。 |
+| `SPINE_KEEP_ROUND_TOKENS` | 32000 | 云端收尾的停止线；最近 3 个已结束工具轮始终留在原文。 |
 | `SPINE_SHADOW_DIR` | `~/.dsh/compaction-spine/shadow` | 备份目录；设了 `DSH_HOME` 时以它替代 `~/.dsh`。 |
 | `SPINE_SHADOW_MAX_BYTES` | 268435456 | 正数直接作为备份字节上限，优先于 `SPINE_SHADOW_MAX_MB`。 |
 | `SPINE_SHADOW_MAX_MB` | 256 | 未设置正数字节上限时，按 MB 设置备份上限。 |
