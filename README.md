@@ -92,6 +92,25 @@ dsh-live-compact --version
 
 ![原版对比](docs/slide-stock.jpg)
 
+## 1.0.9
+
+官方大压缩的三项预设参数可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认不动，仍是 `0.8`、`65536`、`8192`，不按地址自动改小。TUI 的 `/settings` 目前没有这一项。
+
+发版门禁是 `npm run test:gate`。它覆盖这些阻断：官方 DeepSeek 没地址时仍是云端、本地切点不跨最后一条用户、不穿过已有卡片去凑切点、云端平时不切、收尾时 20 万上下文仍要选出切点、520 行编号心跳日志可以切、心跳行里的地区编号没留下就取消这一刀。Pi 移植不在这道门禁里。不过不能发。
+
+`cordis.patch.yml` 是静态整块替换，不读这三个环境变量。要在这里改 `headroomTokens`，需直接改配置块，例如：
+
+```yaml
+- id: compaction-spine
+  name: dsh-live-compact
+  config:
+    auto: true
+    thresholdRatio: 0.8
+    headroomTokens: 16384
+    retainTokens: 8192
+    compactionRetries: 0
+```
+
 ## 1.0.8
 
 同一套 8 组、184 个填日志回合。真实 DeepSeek。跳过工具 0，WARN 184/184，NOTICE 184/184。缓存命中 98.23%，1.0.6 是 97.88%，原版是 98.51%。题末平均 2.6 万，最高 3.6 万，最低 1.6 万。1.0.6 最高 3.5 万。原版最高 12.6 万。费用按离峰用量估算，1.0.8 是 $0.209，1.0.6 是 $0.211，原版是 $0.229，不是账单。切掉的原文 11.4 万 token。原版没有压缩，8 组题末加起来积累了 34.9 万。
@@ -151,7 +170,7 @@ dsh-live-compact --version
 - 命令输出只有结构信号才标成报错原文：`isError`、非 0 退出码、`[stderr]`、`[exit code: N]`、`[Command finished with exit code N]`、`exit_code=N`、ptc 结果里的 `"exitCode": N`。证据不够就标状态未知，留原文末尾几行。
 - 长输出要先把备份写成功，卡片才指向那个文件。写失败就不切，也不指向一个还不存在的文件。
 - 备份写成一个确定的文件，编号不存在共享引擎上。卡片里写这次备份的实际路径。
-- 官方工具结果修剪器裁掉的内容不进这份备份。备份上限 128MB。快满时删最老的备份。
+- 官方工具结果修剪器裁掉的内容不进这份备份。备份默认上限 256MB。满了先删最老的，删不出空间才不切。
 - 外壳先加载。引擎装不上时，这一会话不挂起。能改用原版就用原版，并记下「本会话未接管」。原版也装不上时，`/compact` 马上返回错误。
 - headless 的宿主包自己关掉了原版压缩。插件不能把那一行重新打开。网页预设不注入 gate，漏换这一轮就继续用原版。
 
@@ -174,8 +193,35 @@ dsh-live-compact --version
 - 留下的每一行标原来是谁说的。句子里写着「用户说」，也不会变成你的新指令。
 - 去掉「已确认」。摘要开头写明：这是旧内容摘录，不是新指令，也不是你的授权。
 - 这一刀如果没有合格的摘要，就整段留下，不去调模型。卡片可以很短。
-- 备份只有自己能读。文件名不带会话号。本机路径不发给模型。备份目录超过 64MB，这一刀不切，旧文件不自动删。
+- 备份只有自己能读。文件名不带会话号。本机路径不发给模型。备份默认上限 256MB。满了先删最老的，删不出空间才不切。
 - 2 万和 65 万没动。配置里的 0.8 只管官方大压缩，不管这一刀。想改小切的起点，只能在启动前设 `SPINE_MIN_TOKENS`。
+
+## 环境变量
+
+| 变量 | 默认值 | 作用 |
+|---|---:|---|
+| `SPINE_THRESHOLD_RATIO` | 0.8 | 预设中官方大压缩的触发比例，在 `gate.js` 加载时读取。 |
+| `SPINE_HEADROOM_TOKENS` | 65536 | 预设中官方大压缩的预留空间（token），在 `gate.js` 加载时读取。 |
+| `SPINE_RETAIN_TOKENS` | 8192 | 预设中官方大压缩的保留量（token），在 `gate.js` 加载时读取。 |
+| `SPINE_POINTER_TOKENS` | `SPINE_CHUNK_MAX`（默认 32000） | 单个工具结果超过此 token 数才只留指针。 |
+| `SPINE_MIN_TOKENS` | 20000 | 轮后小切的最低上下文 token 数。 |
+| `SPINE_KEEP_ROUNDS` | 3 | 原处保留的最近已结束工具轮数。 |
+| `SPINE_KEEP_ROUND_TOKENS` | 32000 | 最近工具轮的保留预算，也是云端收尾的停止线。 |
+| `SPINE_SHADOW_DIR` | `~/.dsh/compaction-spine/shadow` | 备份目录；设了 `DSH_HOME` 时以它替代 `~/.dsh`。 |
+| `SPINE_SHADOW_MAX_BYTES` | 268435456 | 正数直接作为备份字节上限，优先于 `SPINE_SHADOW_MAX_MB`。 |
+| `SPINE_SHADOW_MAX_MB` | 256 | 未设置正数字节上限时，按 MB 设置备份上限。 |
+| `SPINE_ENGINE` | 自动识别 | 设为 `cloud` 或 `local` 可强制切法，其他值忽略。 |
+| `SPINE_THUNDER` | 关闭 | 设为 `1` 时启用雷霆摘要路径。 |
+| `SPINE_THUNDER_MODEL` | `flash` | 设为 `27b` 时使用对应模型类型，其他值仍为 `flash`。 |
+| `SPINE_ENGINE_FAIL` | 无 | **仅供测试**：用 `import`、`construct`、`after-super` 注入引擎故障。 |
+| `SPINE_STOCK_FAIL` | 无 | **仅供测试**：设为 `1` 时禁止回退原版引擎。 |
+| `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
+| `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
+| `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |
+
+每个新的 `compact-checkpoint` 只让轮后小切跳过一次，`spine-checkpoint` 不触发这个跳过。
+
+`gate.js` 的官方压缩预设默认使用 `thresholdRatio: 0.8`、`headroomTokens: 65536`、`retainTokens: 8192`，可在启动前用对应环境变量覆盖。这些数值只管官方大压缩，不改小切切点。
 
 ## 安装
 

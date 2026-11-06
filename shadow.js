@@ -7,9 +7,26 @@
  * Delete legacy root files, then dead sessions, then old files of the current session.
  * Never delete the current card's file or another live session. ENOENT counts as already freed.
  */
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 const PLUGIN_NAME = /^(?:(?:cut|official|shadow)-\d+-[0-9a-f]{8}|raw-[0-9a-f]{16}|\d+-[0-9a-f]{8}-[0-9a-f]{8}|\d+-[0-9a-f]{8,16})\.txt$/;
 const SESSION_MARK = /^# spine-session (\S+)/;
@@ -97,6 +114,179 @@ export function recordCutStats(dir, { saved = 0, rewrite = 0 } = {}) {
   } catch {
     return null;
   }
+}
+
+export function shadowAccessPlan(platform = process.platform, userSid = "") {
+  if (platform === "win32") {
+    if (!/^S-\d+(?:-\d+)+$/.test(userSid)) {
+      throw new Error("spine: current Windows user SID is required");
+    }
+
+    return {
+      kind: "acl",
+      usesChmodOnly: false,
+      inheritance: "remove",
+      grant: [
+        `*${userSid}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+      ],
+      sddl:
+        `D:P(A;OICI;FA;;;${userSid})` +
+        "(A;OICI;FA;;;SY)" +
+        "(A;OICI;FA;;;BA)",
+    };
+  }
+
+  return {
+    kind: "mode",
+    usesChmodOnly: true,
+    dirMode: 0o700,
+    fileMode: 0o600,
+  };
+}
+
+export function defaultShadowAccessRunner({ path, kind, platform, execFile = execFileSync }) {
+  if (platform !== "win32") {
+    const plan = shadowAccessPlan(platform);
+    chmodSync(path, kind === "dir" ? plan.dirMode : plan.fileMode);
+    return true;
+  }
+
+  const identity = execFile(
+    "whoami.exe",
+    ["/user", "/fo", "csv", "/nh"],
+    { encoding: "utf8", windowsHide: true },
+  );
+  const match = identity.match(/,"(S-\d+(?:-\d+)+)"\s*$/i);
+  if (!match) {
+    throw new Error("spine: cannot determine current Windows user SID");
+  }
+
+  const plan = shadowAccessPlan("win32", match[1]);
+  const target = resolve(path);
+  const temp = mkdtempSync(join(tmpdir(), "spine-acl-"));
+
+  try {
+    const aclFile = join(temp, "access.acl");
+    const aclBody = `\ufeff${basename(target)}\r\n${plan.sddl}\r\n`;
+
+    writeFileSync(aclFile, Buffer.from(aclBody, "utf16le"), {
+      flag: "wx",
+      mode: 0o600,
+    });
+
+    execFile(
+      "icacls.exe",
+      [dirname(target), "/restore", aclFile, "/q"],
+      { stdio: "pipe", windowsHide: true },
+    );
+
+    return true;
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+export function tightenShadow(path, kind = "dir", access = {}) {
+  const platform = access.platform ?? process.platform;
+  const runner = access.runner ?? defaultShadowAccessRunner;
+
+  try {
+    if (runner({ path, kind, platform }) !== true) {
+      throw new Error("permission runner did not confirm success");
+    }
+  } catch (cause) {
+    const error = new Error(
+      "spine: shadow permission action failed; backup refused",
+      { cause },
+    );
+    error.code = "ESHADOWACCESS";
+    throw error;
+  }
+}
+
+export function ensureShadowDir(dir, access = {}) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  tightenShadow(dir, "dir", access);
+  return dir;
+}
+
+export function discardShadowFiles(files, cause) {
+  const errors = [];
+
+  for (const file of files) {
+    try {
+      unlinkSync(file);
+    } catch (error) {
+      if (error?.code !== "ENOENT") errors.push(error);
+    }
+  }
+
+  if (errors.length > 0) {
+    const error = new AggregateError(
+      [cause, ...errors],
+      "spine: shadow write failed and cleanup failed",
+    );
+    error.code = cause?.code || "ESHADOWCLEANUP";
+    throw error;
+  }
+}
+
+export function writeShadowFile(
+  file,
+  body,
+  access = {},
+  { exclusive = false } = {},
+) {
+  const dir = dirname(file);
+  ensureShadowDir(dir, access);
+
+  const target = exclusive
+    ? file
+    : join(
+        dir,
+        `.${basename(file)}-${randomBytes(8).toString("hex")}.tmp`,
+      );
+
+  let fd = null;
+  let created = false;
+  let protectedPath = target;
+
+  try {
+    fd = openSync(target, "wx", 0o600);
+    created = true;
+
+    if (!exclusive) {
+      renameSync(target, file);
+      protectedPath = file;
+    }
+
+    tightenShadow(protectedPath, "file", access);
+    writeFileSync(fd, body);
+
+    const opened = fd;
+    fd = null;
+    closeSync(opened);
+    return file;
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+
+    if (created) discardShadowFiles([protectedPath], error);
+    throw error;
+  }
+}
+
+export function writeShadowOwner(dir, access = {}) {
+  return writeShadowFile(
+    join(dir, "owner"),
+    String(process.pid),
+    access,
+  );
 }
 
 export function shadowMaxBytes(env = process.env) {

@@ -6,8 +6,15 @@
  * An existing file must match the first meta hash. A mismatch is not a backup.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  discardShadowFiles,
+  ensureShadowDir,
+  tightenShadow,
+  writeShadowFile,
+  writeShadowOwner,
+} from "./shadow.js";
 
 export const PRUNE_MARKER = "[... tool result middle pruned ...]";
 
@@ -90,37 +97,103 @@ export function rawExcerptText(surface, record) {
 // 正文已经带修剪标记、又没有旧文件时，不把修剪后的文本当成原文。
 // Write once per toolCallId. An existing file is verified, never overwritten.
 // Pruned text with no earlier file is not stored as the original.
-export function captureToolResult({ dir, toolCallId, text, turn, name, pathLabel }) {
-  if (!toolCallId) return { ok: false, reason: "missing-id", toolCallId: "" };
+export function captureToolResult({
+  dir,
+  toolCallId,
+  text,
+  turn,
+  name,
+  pathLabel,
+  access = {},
+}) {
+  if (!toolCallId) {
+    return { ok: false, reason: "missing-id", toolCallId: "" };
+  }
+
   const body = String(text ?? "");
   const file = join(dir, rawName(toolCallId));
-  if (existsSync(file)) return readExisting(file, toolCallId);
-  if (body.includes(PRUNE_MARKER)) return { ok: false, reason: "already-pruned", toolCallId };
+  const metaPath = `${file}.meta.json`;
+
+  if (!existsSync(file) && body.includes(PRUNE_MARKER)) {
+    return { ok: false, reason: "already-pruned", toolCallId };
+  }
+
+  const readProtectedExisting = () => {
+    tightenShadow(file, "file", access);
+    if (existsSync(metaPath)) {
+      tightenShadow(metaPath, "file", access);
+    }
+    return readExisting(file, toolCallId);
+  };
+
+  let createdRaw = false;
+
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    ensureShadowDir(dir, access);
+
+    if (existsSync(file)) return readProtectedExisting();
+
     const bytes = Buffer.from(body, "utf8");
     const hash = contentHash(bytes);
-    const metaPath = `${file}.meta.json`;
-    writeFileSync(file, bytes, { flag: "wx", mode: 0o600 });
-    try {
-      writeFileSync(metaPath, JSON.stringify({
+
+    writeShadowFile(file, bytes, access, { exclusive: true });
+    createdRaw = true;
+
+    writeShadowFile(
+      metaPath,
+      JSON.stringify({
         toolCallId,
         bytes: bytes.length,
         sha256: hash,
         turn: turn ?? null,
         name: name || "",
         label: pathLabel || "",
-      }), { mode: 0o600 });
-    } catch (error) {
-      try {
-        unlinkSync(file);
-      } catch {}
+      }),
+      access,
+    );
+
+    return {
+      ok: true,
+      existed: false,
+      path: file,
+      bytes: bytes.length,
+      sha256: hash,
+      toolCallId,
+      label: pathLabel || "",
+    };
+  } catch (error) {
+    if (createdRaw) discardShadowFiles([file], error);
+
+    if (
+      error?.code === "ESHADOWACCESS" ||
+      error?.code === "ESHADOWCLEANUP"
+    ) {
       throw error;
     }
-    return { ok: true, existed: false, path: file, bytes: bytes.length, sha256: hash, toolCallId, label: pathLabel || "" };
-  } catch (error) {
-    if (error?.code === "EEXIST" && existsSync(file)) return readExisting(file, toolCallId);
+
+    if (error?.code === "EEXIST" && existsSync(file)) {
+      return readProtectedExisting();
+    }
+
     return { ok: false, reason: "unwritable", toolCallId };
+  }
+}
+
+export function captureOwnedToolResult(options) {
+  const { dir, access = {} } = options;
+  const owner = join(dir, "owner");
+  const ownerExisted = existsSync(owner);
+  let ownerWritten = false;
+
+  try {
+    writeShadowOwner(dir, access);
+    ownerWritten = true;
+    return captureToolResult(options);
+  } catch (error) {
+    if (ownerWritten && !ownerExisted) {
+      discardShadowFiles([owner], error);
+    }
+    throw error;
   }
 }
 

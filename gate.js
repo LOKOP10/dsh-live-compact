@@ -6,9 +6,9 @@ const PRESET_IDS = new Set(["standard", "ptc", "minimal", "cordis", "preset-stan
 export const GATE_SERVICE = "liveCompactPresetGate";
 export const PRESET_ENGINE_CONFIG = {
   auto: true,
-  thresholdRatio: 0.8,
-  headroomTokens: 65536,
-  retainTokens: 8192,
+  thresholdRatio: Number(process.env.SPINE_THRESHOLD_RATIO || 0.8),
+  headroomTokens: Number(process.env.SPINE_HEADROOM_TOKENS || 65536),
+  retainTokens: Number(process.env.SPINE_RETAIN_TOKENS || 8192),
   compactionRetries: 0,
 };
 
