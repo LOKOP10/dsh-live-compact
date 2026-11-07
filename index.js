@@ -39,7 +39,7 @@ import {
   withShadowRoot,
 } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
-import { OFFICIAL_COMPACTION_KIND, inCooldown, lastSourceKindSeq } from "./cooldown.js";
+import { inCooldown, skipLiveOfficialCompaction } from "./cooldown.js";
 
 const { BasicCompactionEngine } = await loadBase();
 const { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } = await loadCompaction();
@@ -525,12 +525,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const op = AbortSignal.any([agentSignal, signal]);
         let measurement = this.ctx.tokenMeter.measure(agent.session);
         if (measurement.totalTokens < settings.minTokens || measurement.totalTokens >= settings.bigGate) return;
-        // 官方压缩后的第一次 idle 先让一让，免得紧接着又把它产出的摘要卷走。
-        // 主判据是「这条官方卡片处理过没有」（与实际间隔多久无关），时间窗口只作可选兜底。
-        const officialSeq = lastSourceKindSeq(agent.session, OFFICIAL_COMPACTION_KIND);
-        if (officialSeq !== undefined && state.cooldownSeenSeq !== officialSeq) {
-          state.cooldownSeenSeq = officialSeq;
-          this.ctx.logger?.info?.(`spine cooldown: official compaction ${officialSeq} seen, skip this pass`);
+        // Restored cards establish a baseline; a live card still skips once,
+        // even when maintenance or engine construction is delayed.
+        if (skipLiveOfficialCompaction(agent.session)) {
+          this.ctx.logger?.info?.("spine cooldown: live official compaction seen, skip this pass");
           return;
         }
         if (inCooldown(agent.session, { windowMs: settings.cooldownMs })) return;
@@ -711,10 +709,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     return super.compactIfNeeded(agent, trigger, signal);
   }
 
-  // 请求头往往只有 provider。目录和官方 DeepSeek 之后，再读当前配置里的 baseURL。
-  // 读不到地址仍按本地，避免没配地址的会话被当成云端去改前缀。
-  // Headers often carry only the provider. After the catalog and official DeepSeek, read the live profile URL.
-  // No URL still means local, so an unconfigured session is not rewritten as cloud.
+  // Preserve explicit URL precedence. Only the exact account provider gets
+  // its root settings / launch environment sources and a no-address fallback.
   engineFor(agent) {
     const header = agent?.session?.requestHeader?.()?.config || {};
     const context = agent?.session?.requestContext?.() || {};
@@ -725,7 +721,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       headerURL: header.baseURL || context.baseURL || "",
       listed,
       layers: this.providerLayers(),
+      directory: this.configurableProviders(provider),
       patchText: this.profilePatchText(),
+      launchURL: this.accountLaunchURL(provider),
       catalog: this.catalogProviders(),
     });
     return resolveEngine({ provider, baseURL });
@@ -754,9 +752,31 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   providerLayers() {
     try {
       const rows = this.hostService("configEditor")?.configuration?.() || [];
-      return rows.map((row) => ({ override: row?.override, inherited: row?.inherited }));
+      return rows.map((row) => ({ settingsNs: row?.entry?.options?.id, override: row?.override, inherited: row?.inherited }));
     } catch {
       return [];
+    }
+  }
+
+  configurableProviders(provider) {
+    if (provider !== "deepseek-account") return [];
+    try {
+      const llm = this.ctx.llm || this.hostService("llm");
+      return llm?.listConfigurableProviders?.() || [];
+    } catch {
+      return [];
+    }
+  }
+
+  accountLaunchURL(provider) {
+    if (provider !== "deepseek-account") return "";
+    try {
+      const environment = this.hostService("launchEnvironment");
+      // Match launchEnvironmentOf: process env applies only without a snapshot.
+      return environment ? environment.get("DEEPSEEK_BASE_URL")?.value ?? "" : process.env.DEEPSEEK_BASE_URL ?? "";
+    } catch {
+      // Unreadable is not evidence of absence. Keep the decision conservative.
+      return " ";
     }
   }
 

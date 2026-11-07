@@ -671,6 +671,21 @@ export function providerURLFromLayers(layers, provider) {
   return "";
 }
 
+// The account plugin owns a root baseURL, rather than providers[id]. Resolve
+// only the directory-declared namespace/path; never borrow another row's URL.
+function accountURLFromLayers(layers, directory) {
+  const owner = (directory || []).find((entry) => entry?.provider === "deepseek-account");
+  if (!owner?.settingsNs || !Array.isArray(owner.settingsPath) || owner.settingsPath.length !== 0) return "";
+  const layer = (layers || []).find((row) => row?.settingsNs === owner.settingsNs);
+  if (!layer) return "";
+  // The verified account directory uses []; a missing field inherits.
+  const override = recordOf(layer.override);
+  const inherited = recordOf(layer.inherited);
+  const plain = (value) => typeof value?.get === "function" ? value.get() : value;
+  const value = plain(override?.baseURL) ?? plain(inherited?.baseURL);
+  return value == null ? "" : String(value);
+}
+
 // 从配置文件文本里取这一家的 baseURL。缩进结束即停，避免读到下一家。
 // Read one provider's baseURL from patch text. Stop when the indent ends.
 function urlOnLine(line) {
@@ -717,7 +732,7 @@ export function catalogProviderURL(provider, catalog) {
 }
 
 // 请求头优先。然后是当前配置里这一家的地址，这样 BYOK 指向内网时不会被官方默认地址盖掉。
-// 配置没有时才用官方 DeepSeek 和内置目录。仍然没有就空，调用方按本地处理。
+// 配置没有时才用官方 DeepSeek 和内置目录。仍然没有就空，由调用方按精确 provider 兜底。
 // The header wins. Then this provider's configured URL, so a BYOK private endpoint is not replaced by a public default.
 // Official DeepSeek and the built-in catalog apply only when the profile has no URL. Empty stays unresolved.
 export function resolveProviderBaseURL({
@@ -725,9 +740,11 @@ export function resolveProviderBaseURL({
   headerURL = "",
   listed = [],
   layers = [],
+  directory = [],
   config = null,
   patchText = "",
   catalog = [],
+  launchURL = "",
 } = {}) {
   const header = String(headerURL || "");
   if (header) return header;
@@ -735,10 +752,15 @@ export function resolveProviderBaseURL({
   if (listedURL) return listedURL;
   const fromLayers = providerURLFromLayers(layers, provider);
   if (fromLayers) return fromLayers;
+  if (provider === "deepseek-account") {
+    const accountURL = accountURLFromLayers(layers, directory);
+    if (accountURL) return accountURL;
+  }
   const fromConfig = providerURLFromConfig(config, provider);
   if (fromConfig) return fromConfig;
   const fromPatch = providerURLFromPatch(patchText, provider);
   if (fromPatch) return fromPatch;
+  if (provider === "deepseek-account" && launchURL) return String(launchURL);
   const fallback = fallbackProviderURL(provider);
   if (fallback) return fallback;
   return catalogProviderURL(provider, catalog);
@@ -748,8 +770,23 @@ export function resolveEngine({ provider = "", baseURL = "", env = process.env }
   const override = String(env.SPINE_ENGINE || "").trim().toLowerCase();
   if (override === "local" || override === "cloud") return { engine: override, source: "env" };
   if (/strata/i.test(String(provider || ""))) return { engine: "local", source: "provider" };
+  if (provider === "deepseek-account" && baseURL) {
+    try {
+      // Match the account adapter's validated root URL contract. Never let an
+      // explicit invalid value silently become the public account fallback.
+      const url = new URL(baseURL);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+    } catch {
+      return { engine: "local", source: "invalid-address" };
+    }
+  }
   const host = hostOf(baseURL);
-  if (!host) return { engine: "local", source: "unknown" };
+  if (!host) {
+    if (provider === "deepseek-account") return baseURL
+      ? { engine: "local", source: "invalid-address" }
+      : { engine: "cloud", source: "provider" };
+    return { engine: "local", source: "unknown" };
+  }
   if (isLocalHost(host)) return { engine: "local", source: "address" };
   return { engine: "cloud", source: "address" };
 }
