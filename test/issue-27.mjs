@@ -691,6 +691,80 @@ test("eight actual cut/official saves below 80 percent do no backup readdir/stat
   }
 });
 
+for (const optIn of [false, true]) {
+  test(`real raw burst after calibration rotates 200 x 20KiB at a 2MiB cap (${optIn ? "dedicated" : "shared"})`, (t) => {
+    const f = fixture(t);
+    const cap = 2 * 1024 * 1024;
+    configure(t, f, optIn, cap);
+    f.io.now = () => 0;
+    assert.equal(rotation(f, 0, { cap }).used, 0);
+    const scans = f.calls.readdir.length;
+    const records = [];
+    for (let i = 0; i < 200; i++) {
+      const result = captureOwnedToolResult({ dir: join(f.dir, "mine"), root: f.dir,
+        toolCallId: `burst-${i}`, text: "x".repeat(20 * 1024) });
+      assert.equal(result.ok, true);
+      records.push(result.path);
+    }
+    const stats = join(f.dir, "spine-stats.json");
+    writeShadowFile(stats, "{}\n", {}, { root: f.dir });
+    assert.equal(f.calls.readdir.length, scans, "raw capture does not itself call capacity rotation");
+    assert.equal(records.reduce((sum, file) => sum + statSync(file).size, 0), 4096000);
+    assert.ok(records.reduce((sum, file) => sum + statSync(`${file}.meta.json`).size, 0) > 0);
+    assert.ok(statSync(join(f.dir, "mine", "owner")).size > 0);
+    assert.ok(statSync(stats).size > 0);
+    const rotated = rotation(f, 0, { cap, sessionKey: "mine" });
+    assert.equal(rotated.estimated, undefined);
+    assert.equal(rotated.ok, true);
+    assert.equal(rotated.deleted, 119);
+    assert.equal(rotated.used, 1658880);
+    assert.ok(f.calls.readdir.length > scans);
+    const remaining = records.filter(file => existsSync(file));
+    assert.equal(remaining.reduce((sum, file) => sum + statSync(file).size, 0), 1658880);
+    for (const file of records.filter(file => !existsSync(file))) {
+      assert.equal(existsSync(`${file}.meta.json`), false);
+      assert.ok(f.calls.unlink.includes(`${file}.meta.json`));
+    }
+    assert.equal(existsSync(stats), true, "ancillary files stay outside payload quota and deletion");
+  });
+}
+
+test("80 percent waterline and cap equality do not trigger premature deletion", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  f.io.now = () => 0;
+  const file = plant(f, "cut-1-11111111.txt", 600);
+  rotation(f);
+  assert.equal(rotation(f, 199).estimated, true);
+  assert.equal(rotation(f, 200).estimated, undefined);
+  assert.equal(rotation(f, 400).deleted, 0);
+  assert.equal(statSync(file).size, 600);
+  const over = rotation(f, 401);
+  assert.equal(over.ok, true);
+  assert.equal(over.deleted, 1);
+  assert.equal(over.freed, 600);
+});
+
+test("a missing raw body still attempts its exact paired metadata cleanup once", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const file = plant(f, "raw-1111111111111111.txt", 900);
+  writeFileSync(`${file}.meta.json`, "{}");
+  const result = rotation(f, 200, { unlink(path) {
+    if (path === file) {
+      f.io.unlink(path);
+      throw Object.assign(new Error("already removed"), { code: "ENOENT" });
+    }
+    return f.io.unlink(path);
+  } });
+  assert.equal(result.ok, true);
+  assert.equal(result.deleted, 1);
+  assert.equal(result.freed, 900);
+  assert.equal(result.used, 0);
+  assert.equal(existsSync(`${file}.meta.json`), false);
+  assert.deepEqual(f.calls.unlink, [file, `${file}.meta.json`]);
+});
+
 test("UTF-8, Buffer, raw, owner and metadata scopes, overwrite and partial failures are conservatively charged once", (t) => {
   const f = fixture(t);
   configure(t, f);

@@ -1203,14 +1203,10 @@ function rotateShadowLocked({
     try {
       unlink(file.path);
     } catch (error) {
-      if (error?.code === "ENOENT") {
-        used -= file.size;
-        freed += file.size;
-        deleted += 1;
-        continue;
+      if (error?.code !== "ENOENT") {
+        failed = true;
+        break;
       }
-      failed = true;
-      break;
     }
     used -= file.size;
     freed += file.size;
