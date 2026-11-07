@@ -122,6 +122,40 @@ test("a file grant has no inheritance flags", () => {
   resetShadowAccessState();
 });
 
+test("a stale persisted cursor does not recapture the whole log", () => {
+  const seen = [];
+  const engine = Object.create(Spine.prototype);
+  engine.rawSeen = new Map();
+  engine.callIndex = new Map();
+  engine.captureCursor = new Map();
+  engine.persistCapture = true;
+  engine.readCaptureCursor = () => 80;
+  engine.writeCaptureCursor = () => {};
+  engine.captureOne = (_session, event) => { seen.push(event.seq); };
+  const events = [];
+  for (let i = 0; i < 40; i += 1) {
+    events.push({ seq: i, type: "tool/result", data: { message: { toolCallId: `c${i}` } } });
+  }
+  engine.captureNew({ id: "s" }, events);
+  assert.deepEqual(seen, [37, 38, 39]);
+});
+
+test("restart does not recapture historical tool results", () => {
+  const seen = [];
+  const engine = Object.create(Spine.prototype);
+  engine.rawSeen = new Map();
+  engine.callIndex = new Map();
+  engine.captureCursor = new Map();
+  engine.captureOne = (_session, event) => { seen.push(event.seq); };
+  const events = [];
+  for (let i = 0; i < 40; i += 1) {
+    events.push({ seq: i, type: "tool/result", data: { message: { toolCallId: `c${i}` } } });
+  }
+  engine.captureNew({ id: "s" }, events);
+  engine.captureNew({ id: "s" }, events);
+  assert.deepEqual(seen, [37, 38, 39]);
+});
+
 test("replaying many tool results spawns once, not once per result", () => {
   resetShadowAccessState();
   const previous = process.env.SPINE_SHADOW_DIR;

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DEFAULTS } from "../settings.js";
-import { cutCrossesNewerCheckpoint, selectCutIndexes } from "../plan.js";
+import { cutCrossesNewerCheckpoint, cutLongReadRound, keptToolRounds, selectCutIndexes } from "../plan.js";
 import { drainRewrite } from "../shadow.js";
 
 const indexSource = readFileSync(new URL("../index.js", import.meta.url), "utf8");
@@ -17,6 +19,94 @@ test("issue 19 constants stay on the published lines", () => {
   assert.match(indexSource, /const URGENT_TOKENS = 48000/);
   assert.match(indexSource, /const MAX_TAIL = 2200/);
   assert.equal(indexSource.includes("SPINE_MAX_TOKENS"), false);
+});
+
+test("a long read is not kept for three rounds", () => {
+  const events = [
+    { type: "other", toolCalls: 1 },
+    { type: "tool", longRead: true },
+    { type: "other", toolCalls: 1 },
+    { type: "tool" },
+  ];
+  const kept = keptToolRounds(events, 3);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].end, 3);
+});
+
+test("a long read cut stays inside its round and still cuts an oversized round", () => {
+  const kept = [
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 40, balancedBefore: false, balancedAfter: true },
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 40, balancedBefore: false, balancedAfter: true },
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 40, balancedBefore: false, balancedAfter: true },
+  ];
+  const old = [
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 1800, balancedBefore: false, balancedAfter: true },
+  ];
+  const longRead = [
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 1600, balancedBefore: false, balancedAfter: true },
+  ];
+  const items = [...old, ...kept, ...longRead];
+  const start = old.length + kept.length;
+  const picked = cutLongReadRound(items, start, items.length - 1, {
+    engine: "cloud",
+    chunkMin: 1000,
+    chunkMax: 32000,
+    pointerMax: 32000,
+  });
+  assert.equal(picked.start, start);
+  assert.equal(picked.end, items.length - 1);
+  assert.equal(picked.start > old.length + kept.length - 1, true);
+
+  const huge = [
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 32000, balancedBefore: false, balancedAfter: false },
+    { type: "tool", tokens: 32000, balancedBefore: false, balancedAfter: true },
+  ];
+  const oversized = cutLongReadRound(huge, 0, huge.length - 1, {
+    engine: "cloud",
+    chunkMin: 1000,
+    chunkMax: 32000,
+    pointerMax: 32000,
+  });
+  assert.equal(oversized.pointerOnly, true);
+  assert.equal(oversized.start >= 1, true);
+  assert.equal(oversized.end, oversized.start);
+});
+
+test("a long read inside a multi-tool round is not kept", () => {
+  const events = [
+    { type: "other", toolCalls: 2 },
+    { type: "tool", longRead: true },
+    { type: "tool" },
+    { type: "other", toolCalls: 1 },
+    { type: "tool" },
+  ];
+  const kept = keptToolRounds(events, 3);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].end, 4);
+});
+
+test("ordinary fallback is not rejected by the long-read bound", () => {
+  const source = readFileSync(fileURLToPath(new URL("../index.js", import.meta.url)), "utf8");
+  assert.equal(source.includes("if (usedLongCut && (picked.start < longSpan.start || picked.end > longSpan.end)) return null;"), true);
+  assert.equal(source.includes("if (longSpan && (picked.start < longSpan.start || picked.end > longSpan.end)) return null;"), false);
+  const old = selectCutIndexes([
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 1800, balancedBefore: false, balancedAfter: true },
+  ], { engine: "cloud", drain: true, chunkMin: 1000, chunkMax: 32000, maxEnd: 1 });
+  assert.equal(old.start, 0);
+  assert.equal(old.end, 1);
+  const blocked = cutLongReadRound([
+    { type: "assistant", tokens: 16, balancedBefore: true, balancedAfter: false },
+    { type: "tool", tokens: 20000, balancedBefore: false, balancedAfter: false },
+    { type: "tool", tokens: 20000, balancedBefore: false, balancedAfter: true },
+  ], 0, 2, { engine: "cloud", chunkMin: 1000, chunkMax: 32000, pointerMax: 32000 });
+  assert.equal(blocked, null);
 });
 
 test("issue 19 drain does not cut left of a newer checkpoint", () => {

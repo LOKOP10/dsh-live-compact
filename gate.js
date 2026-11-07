@@ -1,15 +1,10 @@
 import { createRequire } from "node:module";
 import { STOCK_ENGINE as STOCK } from "./adapter.js";
+import { configSnapshot, engineConfig } from "./settings.js";
 
 const OURS = "dsh-live-compact";
 const PRESET_IDS = new Set(["standard", "ptc", "minimal", "cordis", "preset-standard", "preset-ptc", "preset-minimal", "preset-cordis"]);
-export const PRESET_ENGINE_CONFIG = {
-  auto: true,
-  thresholdRatio: Number(process.env.SPINE_THRESHOLD_RATIO || 0.8),
-  headroomTokens: Number(process.env.SPINE_HEADROOM_TOKENS || 65536),
-  retainTokens: Number(process.env.SPINE_RETAIN_TOKENS || 8192),
-  compactionRetries: 0,
-};
+export const PRESET_ENGINE_CONFIG = Object.freeze(engineConfig());
 
 const require = createRequire(import.meta.url);
 
@@ -36,38 +31,43 @@ function isPreset(node) {
   return Boolean(node.config && typeof node.config === "object" && !Array.isArray(node.config) && PRESET_IDS.has(node.config.id));
 }
 
-function withEngineConfig(entry) {
-  const previous = entry.config && typeof entry.config === "object" && !Array.isArray(entry.config) ? entry.config : {};
-  return { ...PRESET_ENGINE_CONFIG, ...previous };
+function withEngineConfig(entry, rootConfig) {
+  const previous = entry.config && typeof entry.config === "object" && !Array.isArray(entry.config) ? configSnapshot(entry.config) : {};
+  const { takeoverPresets: _takeover, ...root } = configSnapshot(rootConfig);
+  const merged = { ...root, ...previous };
+  // 较高优先级显式选择 retention 模式时，移除继承的互斥字段。
+  if (previous.retainRatio !== undefined && previous.retainTokens === undefined) delete merged.retainTokens;
+  if (previous.retainTokens !== undefined && previous.retainRatio === undefined) delete merged.retainRatio;
+  return { ...merged, ...engineConfig(merged) };
 }
 
-function rewriteEntry(entry, loadable) {
+function rewriteEntry(entry, loadable, rootConfig) {
   if (!entry || typeof entry !== "object") return entry;
   const next = { ...entry };
   if (entry.name === STOCK) {
     if (!loadable) return entry;
     next.name = OURS;
-    next.config = withEngineConfig(entry);
+    next.config = withEngineConfig(entry, rootConfig);
     return next;
   }
-  if (Array.isArray(entry.config)) next.config = entry.config.map((item) => rewriteEntry(item, loadable));
-  else if (entry.config && typeof entry.config === "object") next.config = rewriteNode(entry.config, loadable);
+  if (Array.isArray(entry.config)) next.config = entry.config.map((item) => rewriteEntry(item, loadable, rootConfig));
+  else if (entry.config && typeof entry.config === "object") next.config = rewriteNode(entry.config, loadable, rootConfig);
   return next;
 }
 
-function rewriteNode(node, loadable) {
-  if (Array.isArray(node)) return node.map((item) => rewriteEntry(item, loadable));
+function rewriteNode(node, loadable, rootConfig) {
+  if (Array.isArray(node)) return node.map((item) => rewriteEntry(item, loadable, rootConfig));
   if (!node || typeof node !== "object") return node;
   const next = { ...node };
-  if (Array.isArray(node.plugins)) next.plugins = node.plugins.map((item) => rewriteEntry(item, loadable));
-  if (Array.isArray(node.config)) next.config = node.config.map((item) => rewriteEntry(item, loadable));
-  else if (node.config && typeof node.config === "object") next.config = rewriteNode(node.config, loadable);
+  if (Array.isArray(node.plugins)) next.plugins = node.plugins.map((item) => rewriteEntry(item, loadable, rootConfig));
+  if (Array.isArray(node.config)) next.config = node.config.map((item) => rewriteEntry(item, loadable, rootConfig));
+  else if (node.config && typeof node.config === "object") next.config = rewriteNode(node.config, loadable, rootConfig);
   return next;
 }
 
-export function rewritePresetConfig(config, loadable = packageLoadable()) {
+export function rewritePresetConfig(config, loadable = packageLoadable(), rootConfig = {}) {
   if (!isPreset(config)) return config;
-  return rewriteNode(config, loadable);
+  return rewriteNode(config, loadable, rootConfig);
 }
 
 function engineEntry(node) {
@@ -100,7 +100,7 @@ export function installPresetGate(ctx, config = {}) {
     const resolved = next();
     if (!enabled()) return resolved;
     const loadable = packageLoadable();
-    const rewritten = rewritePresetConfig(resolved, loadable);
+    const rewritten = rewritePresetConfig(resolved, loadable, config);
     const id = rewritten?.id || rewritten?.config?.id;
     if (isPreset(resolved) && id && !seen.has(String(id))) {
       seen.add(String(id));
@@ -118,7 +118,7 @@ export function installPresetGate(ctx, config = {}) {
 
 // Legacy entry for existing compositions; new installs only register compaction-spine.
 export default class LiveCompactGate {
-  constructor(ctx) {
-    installPresetGate(ctx);
+  constructor(ctx, config) {
+    installPresetGate(ctx, config);
   }
 }

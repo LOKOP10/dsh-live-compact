@@ -796,7 +796,8 @@ check("p0-17 settings schema owns the plugin knobs", () => {
   const shape = shellEntry.Config({});
   const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
   const knobs = ["minTokens", "keepRounds", "keepRoundTokens", "pointerTokens", "chunkMin", "chunkMax", "bigGate", "cooldownMs"];
-  for (const key of knobs) assert.equal(plain(shape[key]), DEFAULTS[key], key);
+  for (const key of knobs) assert.equal(plain(shape[key]), undefined, `${key} preserves absence for env fallback`);
+  assert.deepEqual(readSettings(shape, {}), { ...DEFAULTS, pointerTokens: DEFAULTS.chunkMax });
   assert.equal(plain(shape.takeoverPresets), true);
   for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainTokens", "compactionRetries"]) {
     assert.equal(key in shape, true, key);

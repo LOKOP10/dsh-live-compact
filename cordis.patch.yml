@@ -8,11 +8,7 @@
       name: dsh-live-compact
       config:
         takeoverPresets: true
-        auto: true
-        # These three values are also copied onto the web preset engine by gate.js.
-        thresholdRatio: 0.8
-        headroomTokens: 65536
-        retainTokens: 8192
-        compactionRetries: 0
+        # Runtime resolves explicit settings > environment > the 1.1.1 defaults.
+        # Keep defaults out of the base patch so reset can restore env fallback.
 
 

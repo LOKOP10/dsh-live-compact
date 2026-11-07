@@ -7,7 +7,7 @@
  * On a preflight failure, construct neither engine. Stock would register and hide the real error.
  */
 import { loadBase, loadCompaction, loadSchema } from "./adapter.js";
-import { configSchema, engineConfig } from "./settings.js";
+import { configSchema, configSnapshot, engineConfig } from "./settings.js";
 import { installPresetGate } from "./gate.js";
 
 let Engine = null;
@@ -46,7 +46,7 @@ try {
 // 官方设置界面按这份 schema 自动生成表单。拿不到 schemastery 就退回 stock 的 schema。
 try {
   const schema = await loadSchema();
-  Schema = configSchema(schema.default);
+  Schema = configSchema(schema.default, Stock?.Config);
 } catch {
   Schema = null;
 }
@@ -57,6 +57,7 @@ function reasonText(error) {
 
 export function preflightConfig(config = {}) {
   if (!config || typeof config !== "object") return;
+  config = configSnapshot(config);
   const threshold = config.thresholdRatio;
   if (typeof threshold !== "number") return;
   if (config.retainTokens !== undefined) return;
@@ -66,17 +67,19 @@ export function preflightConfig(config = {}) {
   }
 }
 
-function releaseCompaction(ctx) {
+function compactionRecord(ctx) {
+  const key = ctx?.[Symbol.for("cordis.isolate")]?.compaction;
+  return key === undefined ? undefined : ctx?.reflect?.store?.[key];
+}
+
+function releaseCompaction(ctx, previous) {
   const store = ctx?.reflect?.store;
-  if (!store) return false;
-  const keys = [...Object.getOwnPropertySymbols(store), ...Object.keys(store)];
-  for (const key of keys) {
-    if (store[key]?.name !== "compaction") continue;
-    delete store[key];
-    if (ctx.fiber?.store) delete ctx.fiber.store.compaction;
-    return true;
-  }
-  return false;
+  const key = ctx?.[Symbol.for("cordis.isolate")]?.compaction;
+  const current = compactionRecord(ctx);
+  if (!current || current === previous || current.fiber !== ctx.fiber) return false;
+  delete store[key];
+  if (ctx.fiber?.store?.compaction === current) delete ctx.fiber.store.compaction;
+  return true;
 }
 
 function visibleTakeover(ctx, reason) {
@@ -113,6 +116,7 @@ export default class LiveCompactEntry {
 
   constructor(ctx, config) {
     installPresetGate(ctx, config);
+    const previousCompaction = compactionRecord(ctx);
     let cause = loadError;
     let skipStock = process.env.SPINE_ENGINE_FAIL === "construct";
     if (skipStock) cause = new Error("spine: constructor refused");
@@ -126,10 +130,10 @@ export default class LiveCompactEntry {
     }
     if (!loadError && !skipStock && Engine) {
       try {
-        return new Engine(ctx, engineConfig(config));
+        return new Engine(ctx, config);
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
-        releaseCompaction(ctx);
+        releaseCompaction(ctx, previousCompaction);
         skipStock = true;
       }
     }
@@ -140,7 +144,7 @@ export default class LiveCompactEntry {
         return new Stock(ctx, engineConfig(config));
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
-        releaseCompaction(ctx);
+        releaseCompaction(ctx, previousCompaction);
       }
     }
     visibleTakeover(ctx, reasonText(cause));

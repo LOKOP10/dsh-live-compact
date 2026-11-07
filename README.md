@@ -40,7 +40,9 @@ dsh-live-compact --version
 1. Windows 上取 SID 和写权限不再走 PATH。固定调用 `%SystemRoot%\System32` 下的 `whoami.exe` 和 `icacls.exe`。环境变量不是盘符绝对路径时，这次备份直接跳过，不退回裸命令名。
 2. 不再使用需要还原特权的 `icacls /restore`。目录用 `/inheritance:r /grant:r`，给当前用户、SYSTEM、Administrators 三条可继承的完全控制。文件只用 `F`，不带 `(OI)(CI)`。已收紧目录里的文件不再逐条跑 `icacls`。当前用户 SID 和目录权限每个进程只做一次。
 3. 权限失败不再把宿主打退出。这次备份不落盘，不退回 `chmod`，只提示一次。压缩照常进行。
-4. 切点、65 万、3.2 万、`CHUNK_MIN`、云端默认值和 `SPINE_THUNDER` 没改。
+4. 进程重启后补抓工具结果，只补最近 3 轮。已经记下的位置还在，就从那里接着记。记下的位置比当前日志还大，按重启口径补最近 3 轮，不从 0 把整份日志再扫一遍。
+5. 一轮里有不少于 1000 token 的 `read`，这一刀只切这一轮，不把要留的后 3 轮短结果一起卷进去。这一轮里单个工具结果达到 3.2 万，只留指针。这一轮切不下来，才按原来的规则切更早的轮。
+6. 65 万、4.8 万、3.2 万、`CHUNK_MIN` 1000、云端默认 `0.8` / `65536` / `8192`、`SPINE_THUNDER` 默认关闭，都没改。没有加「省下的必须盖过重写」这种新门槛。备份目录快满时仍是先扫再判断，这版没改，留到 1.1.2。
 
 ## 1.1.0
 
@@ -51,17 +53,21 @@ dsh-live-compact --version
 
 ## 门禁和复测
 
-`npm run test:gate` 已过。Issue #19 的卡片地板、一次收尾重写只记一次、65 万和 `CHUNK_MIN` 1000 不动，以及空闲时不再重扫全日志，都在这道门禁里。连模型的 8 组 31 轮没有重跑。这次不改填日志题的判分，也不改切哪一段。下面四张图是 1.0.9 那次实测，1.1.0 沿用。
+`npm run test:gate` 已过。Windows 取权限、宿主不退出、重启只补最近 3 轮、长 `read` 只切自己那一轮，都在这道门禁里。65 万、3.2 万、`CHUNK_MIN` 1000、云端默认值没改。
 
-云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。本地看题对不对和切掉的 token。DS V4.1 Flash，8 组，184/184，跳过 0，缓存 98.22%，题末最高 35334，切掉 97306，估算费用 $0.208。GLM 5.3 Flash，同一套 8 组，184/184，同一公式缓存 74.66%，切掉 481483。第 6、8 组几乎每轮只读一次全文，规则没有为它改。Coder 390 27B，3 组 31 轮，填日志 69/69，切掉 20635，都在第 30 轮。墙钟 29 分、20 分、86 分。费用是离峰用量估算，不是账单。
+这轮连的是插件版。10 组同一套 31 轮填日志，组内串行，两个模型同时开。原版 DSH 压缩对比留到 1.1.2。Coder 390 27B 这轮没跑，后补。测评图在下面，也在 [v1.1.1](https://github.com/Tranquillitatis-Lab/dsh-live-compact/releases/tag/v1.1.1)。
 
-![汇总分题](docs/slide-110-by-question.jpg)
+云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。这个命中是这些首步的 `cacheRead / (cacheRead + input)` 加总。切掉的 token 是 `spine-cuts.jsonl` 里 `saved` 的合计。含切刀的轮是这些轮的墙钟合计，刀本身是毫秒。任务墙钟从第 1 轮文件生成算到第 31 轮写完。结束上下文是最后一轮的 `totalTokens`，已经包含前面各轮，不是每轮增量。
 
-![DS V4.1 Flash](docs/slide-110-ds.jpg)
+DS V4.1 Flash，10 组，填日志 230/230，跳过 0。首步缓存 98.64%。切掉 65180。10 组墙钟合计 36 分 18 秒。多数组结束在 3.5 万到 4.6 万。第 1 组 `read` 全文 25 次，正文留在上下文里，四刀只省 21493，结束 282871。第 2 组几乎只用 bash，只 `read` 一次，没切，结束 37781。
 
-![GLM 5.3 Flash](docs/slide-110-glm.jpg)
+GLM 5.3 Flash，同一插件、同一套题。第 1、2、3、4、8、9、10 组填日志 23/23。第 5、6 组全程连接失败，不计入。第 7 组前段连接失败，填日志 14/23，不算通过。不要写成 230/230。有用量的轮首步缓存 98.97%。第 1、2 组主要是 grep，没切，结束 39511 和 29987。插件没有把 GLM 切得更多。第 4、9 组也反复 `read` 全文，结束 285535 和 281515，和第 1 组 DS 是同一种形状。可比的 7 组里，DS 每组都更快。
 
-![Coder 390 27B](docs/slide-110-390.jpg)
+![插件版对比](docs/slide-111-overview.jpg)
+
+![DS V4.1 Flash](docs/slide-111-ds.jpg)
+
+![GLM 5.3 Flash](docs/slide-111-glm.jpg)
 
 ## 1.0.9
 
@@ -238,13 +244,16 @@ dsh-live-compact --version
 
 | 变量 | 默认值 | 作用 |
 |---|---:|---|
-| `SPINE_THRESHOLD_RATIO` | 0.8 | 预设中官方大压缩的触发比例，在 `gate.js` 加载时读取。 |
-| `SPINE_HEADROOM_TOKENS` | 65536 | 预设中官方大压缩的预留空间（token），在 `gate.js` 加载时读取。 |
-| `SPINE_RETAIN_TOKENS` | 8192 | 预设中官方大压缩的保留量（token），在 `gate.js` 加载时读取。 |
+| `SPINE_THRESHOLD_RATIO` | 0.8 | 官方大压缩的触发比例，构造引擎或加载预设时读取。 |
+| `SPINE_HEADROOM_TOKENS` | 65536 | 官方大压缩的预留空间（token），构造引擎或加载预设时读取。 |
+| `SPINE_RETAIN_TOKENS` | 8192 | 官方大压缩的保留量（token），构造引擎或加载预设时读取；显式 `retainRatio` 优先。 |
 | `SPINE_POINTER_TOKENS` | `SPINE_CHUNK_MAX`（默认 32000） | 单个工具结果超过此 token 数才只留指针。 |
 | `SPINE_MIN_TOKENS` | 20000 | 轮后小切的最低上下文 token 数。 |
-| `SPINE_KEEP_ROUNDS` | 3 | 原处保留的最近已结束工具轮数。 |
+| `SPINE_KEEP_ROUNDS` | 3 | 原处保留的最近已结束工具轮数，至少 1 轮；旧非法值回退。 |
 | `SPINE_KEEP_ROUND_TOKENS` | 32000 | 云端收尾的停止线；最近 3 个已结束工具轮始终留在原文。 |
+| `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
+| `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
+| `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |
 | `SPINE_SHADOW_DIR` | `~/.dsh/compaction-spine/shadow` | 备份目录；设了 `DSH_HOME` 时以它替代 `~/.dsh`。 |
 | `SPINE_SHADOW_MAX_BYTES` | 268435456 | 正数直接作为备份字节上限，优先于 `SPINE_SHADOW_MAX_MB`。 |
 | `SPINE_SHADOW_MAX_MB` | 256 | 未设置正数字节上限时，按 MB 设置备份上限。 |
@@ -254,11 +263,11 @@ dsh-live-compact --version
 | `SPINE_ENGINE_FAIL` | 无 | **仅供测试**：用 `import`、`construct`、`after-super` 注入引擎故障。 |
 | `SPINE_STOCK_FAIL` | 无 | **仅供测试**：设为 `1` 时禁止回退原版引擎。 |
 
-这些环境变量只在配置缺席时兜底。优先级是：**配置 > 环境变量 > 默认值**。
+设置界面中的数值留空或重置会清除显式覆盖。优先级是：**显式配置 > 有效环境变量 > 默认值**；空串、纯空白和非数字环境变量视为未配置，显式 `0` 仍对允许零值的字段有效。未配置字段可显示为空，旁边的说明列出默认值。
 
-| `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
-| `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
-| `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |
+插件小切参数在每次轮后维护开始时取得本引擎的一致快照，保存后下一次维护生效，多个引擎互不覆盖。官方大压缩参数沿用宿主的构造时快照，保存后需要重建引擎或会话。宿主支持的 `retainRatio`、`maxTokens`、摘要模型路由、`modelPolicies`、溢出重试等配置继续由宿主校验并保留；`retainRatio` 与 `retainTokens` 互斥。
+
+接管开关只影响未来加载的官方预设。新预设按 **预设引擎显式配置 > 根插件显式配置 > 有效环境变量 > 默认值** 取值；已有预设保留加载时的数值，根设置后续修改需要重新加载预设。原生客户端 slot、资源声明和安装方式沿用现有接口。
 
 每个新的 `compact-checkpoint` 只让轮后小切跳过一次，`spine-checkpoint` 不触发这个跳过。
 
