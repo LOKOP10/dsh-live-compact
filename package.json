@@ -41,7 +41,7 @@
     "compaction"
   ],
   "scripts": {
-    "test:gate": "node test/p0-gate.mjs && node test/p0-blockers.mjs && node --test test/cooldown.test.mjs test/gate-config.test.mjs test/drain-stopline.mjs test/scan-once.mjs test/issue-19.mjs test/issue-20.mjs test/client-settings.test.mjs test/settings-integration.test.mjs"
+    "test:gate": "node test/p0-gate.mjs && node test/p0-blockers.mjs && node --test test/cooldown.test.mjs test/gate-config.test.mjs test/drain-stopline.mjs test/scan-once.mjs test/issue-19.mjs test/issue-20.mjs test/issue-27.mjs test/client-settings.test.mjs test/settings-integration.test.mjs"
   },
   "engines": {
     "node": "^22.19 || >=24",

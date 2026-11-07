@@ -15,7 +15,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
@@ -28,12 +27,14 @@ import {
   flushDrainStats,
   noteShadowWarning,
   rotateShadow,
+  shadowDirectory,
   sessionDir,
   shadowAccessFused,
   shadowFileBody,
   shadowMaxBytes,
   writeShadowFile,
   writeShadowOwner,
+  withShadowRoot,
 } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 import { OFFICIAL_COMPACTION_KIND, inCooldown, lastSourceKindSeq } from "./cooldown.js";
@@ -106,12 +107,6 @@ function restartCaptureCursor(events, keepRounds = DEFAULTS.keepRounds) {
   return Number.isInteger(boundary?.seq) ? boundary.seq + 1 : 0;
 }
 
-function shadowDirectory() {
-  if (process.env.SPINE_SHADOW_DIR) return process.env.SPINE_SHADOW_DIR;
-  const root = process.env.DSH_HOME || join(homedir(), ".dsh");
-  return join(root, "compaction-spine", "shadow");
-}
-
 function sessionKey(agent) {
   const id = agent?.session?.id;
   return typeof id === "string" && id.length > 0 ? id : DEFAULT_KEY;
@@ -161,6 +156,7 @@ export function saveShadowImpl(
   warnKey = DEFAULT_KEY,
   protectPaths = [],
   access = {},
+  rotationIO = {},
 ) {
   const shadow = shadowDirectory();
   ensureShadowDir(shadow, access);
@@ -169,60 +165,63 @@ export function saveShadowImpl(
   const dir = sessionDir(shadow, warnKey);
   ensureShadowDir(dir, access);
 
-  const owner = join(dir, "owner");
-  const ownerExisted = existsSync(owner);
-  let ownerWritten = false;
+  return withShadowRoot(shadow, () => {
+    const owner = join(dir, "owner");
+    const ownerExisted = existsSync(owner);
+    let ownerWritten = false;
 
-  try {
-    writeShadowOwner(dir, access);
-    ownerWritten = true;
+    try {
+      writeShadowOwner(dir, access, shadow);
+      ownerWritten = true;
 
-    const body = shadowFileBody(warnKey, shadowBody(messages));
-    const incoming = Buffer.byteLength(body);
-    const cap = shadowMaxBytes();
+      const body = shadowFileBody(warnKey, shadowBody(messages));
+      const incoming = Buffer.byteLength(body);
+      const cap = shadowMaxBytes();
 
-    const rotation = rotateShadow({
-      dir: shadow,
-      incomingBytes: incoming,
-      protectPath: file,
-      protectPaths,
-      sessionKey: warnKey,
-      cap,
-    });
+      const rotation = rotateShadow({
+        ...rotationIO,
+        dir: shadow,
+        incomingBytes: incoming,
+        protectPath: file,
+        protectPaths,
+        sessionKey: warnKey,
+        cap,
+      });
 
-    if (!rotation.ok) {
-      this.warnShadowFull(warnKey, shadow, rotation.used, cap);
-      if (required) {
-        throw new Error(
-          "spine: shadow backup is full; leaving the span",
+      if (!rotation.ok) {
+        this.warnShadowFull(warnKey, shadow, rotation.used, cap);
+        if (required) {
+          throw new Error(
+            "spine: shadow backup is full; leaving the span",
+          );
+        }
+        return;
+      }
+
+      if (rotation.deleted > 0) {
+        this.ctx.logger?.info?.(
+          `spine: shadow 轮换 删除 ${rotation.deleted} 个文件，` +
+          `腾出 ${rotation.freed} 字节，` +
+          `用量 ${rotation.used + incoming}/${cap}`,
         );
       }
-      return;
-    }
 
-    if (rotation.deleted > 0) {
-      this.ctx.logger?.info?.(
-        `spine: shadow 轮换 删除 ${rotation.deleted} 个文件，` +
-        `腾出 ${rotation.freed} 字节，` +
-        `用量 ${rotation.used + incoming}/${cap}`,
-      );
-    }
+      if (rotation.oversize) {
+        this.warnShadowOversize(warnKey, cap);
+      }
 
-    if (rotation.oversize) {
-      this.warnShadowOversize(warnKey, cap);
-    }
+      writeShadowFile(file, body, access, { root: shadow });
 
-    writeShadowFile(file, body, access);
-
-    if (!existsSync(file)) {
-      throw new Error("spine: shadow backup was not written");
+      if (!existsSync(file)) {
+        throw new Error("spine: shadow backup was not written");
+      }
+    } catch (error) {
+      if (ownerWritten && !ownerExisted) {
+        discardShadowFiles([owner], error);
+      }
+      throw error;
     }
-  } catch (error) {
-    if (ownerWritten && !ownerExisted) {
-      discardShadowFiles([owner], error);
-    }
-    throw error;
-  }
+  });
 }
 
 export { saveShadowImpl as saveShadow };
@@ -813,6 +812,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const dir = sessionDir(shadow, key);
       const record = captureOwnedToolResult({
         dir,
+        root: shadow,
         toolCallId: id,
         text: messageText(event.data?.message),
         turn: event.data?.turn,

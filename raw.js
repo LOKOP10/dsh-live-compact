@@ -11,9 +11,11 @@ import { join } from "node:path";
 import {
   discardShadowFiles,
   ensureShadowDir,
+  shadowRootForDir,
   tightenShadow,
   writeShadowFile,
   writeShadowOwner,
+  withShadowRoot,
 } from "./shadow.js";
 
 export const PRUNE_MARKER = "[... tool result middle pruned ...]";
@@ -97,7 +99,31 @@ export function rawExcerptText(surface, record) {
 // 正文已经带修剪标记、又没有旧文件时，不把修剪后的文本当成原文。
 // Write once per toolCallId. An existing file is verified, never overwritten.
 // Pruned text with no earlier file is not stored as the original.
-export function captureToolResult({
+export function captureToolResult(options) {
+  const { dir, toolCallId, access = {}, root = shadowRootForDir(dir) } = options;
+  if (!toolCallId) return { ok: false, reason: "missing-id", toolCallId: "" };
+  if (!existsSync(join(dir, rawName(toolCallId))) && String(options.text ?? "").includes(PRUNE_MARKER)) {
+    return { ok: false, reason: "already-pruned", toolCallId };
+  }
+  try {
+    ensureShadowDir(dir, access);
+  } catch (error) {
+    if (error?.code === "ESHADOWACCESS" || error?.code === "ESHADOWCLEANUP") throw error;
+    return { ok: false, reason: "unwritable", toolCallId };
+  }
+  let entered = false;
+  try {
+    return withShadowRoot(root, () => {
+      entered = true;
+      return captureToolResultLocked({ ...options, root });
+    });
+  } catch (error) {
+    if (!entered || error?.code === "ESHADOWBUSY") return { ok: false, reason: "unwritable", toolCallId };
+    throw error; // In particular, preserve exceptions from failed raw cleanup.
+  }
+}
+
+function captureToolResultLocked({
   dir,
   toolCallId,
   text,
@@ -105,6 +131,7 @@ export function captureToolResult({
   name,
   pathLabel,
   access = {},
+  root = shadowRootForDir(dir),
 }) {
   if (!toolCallId) {
     return { ok: false, reason: "missing-id", toolCallId: "" };
@@ -129,14 +156,12 @@ export function captureToolResult({
   let createdRaw = false;
 
   try {
-    ensureShadowDir(dir, access);
-
     if (existsSync(file)) return readProtectedExisting();
 
     const bytes = Buffer.from(body, "utf8");
     const hash = contentHash(bytes);
 
-    writeShadowFile(file, bytes, access, { exclusive: true });
+    writeShadowFile(file, bytes, access, { exclusive: true, root });
     createdRaw = true;
 
     writeShadowFile(
@@ -150,6 +175,7 @@ export function captureToolResult({
         label: pathLabel || "",
       }),
       access,
+      { root },
     );
 
     return {
@@ -180,15 +206,21 @@ export function captureToolResult({
 }
 
 export function captureOwnedToolResult(options) {
-  const { dir, access = {} } = options;
+  const { dir, access = {}, root = shadowRootForDir(dir) } = options;
+  ensureShadowDir(dir, access);
+  return withShadowRoot(root, () => captureOwnedToolResultLocked({ ...options, root }));
+}
+
+function captureOwnedToolResultLocked(options) {
+  const { dir, access = {}, root } = options;
   const owner = join(dir, "owner");
   const ownerExisted = existsSync(owner);
   let ownerWritten = false;
 
   try {
-    writeShadowOwner(dir, access);
+    writeShadowOwner(dir, access, root);
     ownerWritten = true;
-    return captureToolResult(options);
+    return captureToolResult({ ...options, root });
   } catch (error) {
     if (ownerWritten && !ownerExisted) {
       discardShadowFiles([owner], error);

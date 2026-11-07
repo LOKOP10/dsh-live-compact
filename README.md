@@ -255,6 +255,7 @@ GLM 5.3 Flash，同一插件、同一套题。第 1、2、3、4、8、9、10 组
 | `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
 | `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |
 | `SPINE_SHADOW_DIR` | `~/.dsh/compaction-spine/shadow` | 备份目录；设了 `DSH_HOME` 时以它替代 `~/.dsh`。 |
+| `SPINE_SHADOW_SINGLE_PROCESS` | 关闭 | 仅 `1` 开启专用目录契约；必须另设专用 `SPINE_SHADOW_DIR`，详见下文。 |
 | `SPINE_SHADOW_MAX_BYTES` | 268435456 | 正数直接作为备份字节上限，优先于 `SPINE_SHADOW_MAX_MB`。 |
 | `SPINE_SHADOW_MAX_MB` | 256 | 未设置正数字节上限时，按 MB 设置备份上限。 |
 | `SPINE_ENGINE` | 自动识别 | 设为 `cloud` 或 `local` 可强制切法，其他值忽略。 |
@@ -319,5 +320,15 @@ rm -f ~/.dsh/compaction-spine/shadow/*/*.txt ~/.dsh/compaction-spine/shadow/*.tx
 ```
 
 设了 `DSH_HOME` 或 `SPINE_SHADOW_DIR` 时，目录在那边。删不掉旧文件时，这一刀不切，同一次会话只警告一次。
+
+默认目录（包括 `DSH_HOME` 下的目录）和未声明独占的目录，每次仍执行完整轮换扫描，可继续与旧版 writer 共用。仅设置 `SPINE_SHADOW_DIR` 不开启估算。需要减少扫描时，可将它指向一个**专用本地目录**，并另设 `SPINE_SHADOW_SINGLE_PROCESS=1`；即使显式指定默认目录，也不会开启。这个声明要求整个目录只由本进程的这一份插件使用，不能与旧版、不遵守协调协议的 writer、外部修改目录树或正文的程序共用。自定义代码调用底层备份函数时，必须传入同一 `root`，不能把会话子目录当根。无法满足契约时保持默认设置。
+
+专用根首次完整扫描后，只有目录身份、容量和所有权不变、预计用量严格低于 80% 时才省去备份遍历。所有普通 raw/cut/official 写入先在根目录取得原子锁并检查协作标记；cut/official 的容量检查和正文写入也在同一临界区。raw 沿用原来的捕获规则，写入量计入后续轮换。按 UTF-8 或 Buffer 的实际字节保守计入，覆盖写、部分失败不扣回。达到 80%、换根、改容量或扫描不完整时重新扫描；容量上限、超大备份例外和删除保护不变。统计文件不计入备份容量，统计日志口径不变。共享目录仍可能有同步扫描停顿。
+
+`.spine-rotation.owner` 保存随机生命周期标识，第二个参与进程、worker 或插件副本（含路径别名）会先创建 `.spine-rotation.shared`，再写正文；之后此根一直退回完整扫描，另一进程退出也不自动恢复估算。该标记只检测协作方，不能发现旧版或外部 writer。锁由同目录临时文件完整写入、刷盘并关闭后，通过原子硬链接发布为 `.spine-rotation.lock`，包含持有者 PID 和每次事务唯一的随机标识。文件系统必须支持本地硬链接；不支持时拒绝备份，不降级为空锁或可覆盖的发布方式。
+
+活跃锁、PID 已复用、旧版空目录锁、记录损坏或无法确认死亡时，本次备份被拒绝，原文保留；不按锁龄抢占，`EPERM` 和未知错误也不代表死亡。只有 `process.kill(pid, 0)` 明确返回 `ESRCH`，才先持久化 shared 标记、清除估算，并将该锁的完整身份原子记录到 `.spine-rotation.recovered`。原锁始终保留作围栏，不删除、不替换；之后所有协作实例对这个已确认死亡的身份均走原来的完整轮换和正文写入，PID 后来复用也不改变该身份已经死亡的事实。恢复后共享操作沿用原来的并发语义，不再提供独占容量临界区。标记文件均刷盘，POSIX 另刷目录；Windows 的 Node 接口不能刷目录句柄，不承诺突然断电后的目录项持久性。
+
+正常重启没有遗留锁时，旧 owner 仍触发共享回退，不自动替换或继承旧估算。重新启用独占估算应选新专用目录，或仅在所有使用者停止后清除 `.spine-rotation.lock`、`.spine-rotation.owner`、`.spine-rotation.shared` 和 `.spine-rotation.recovered`。旧版空锁等不明确的记录也只能在确认全部使用者停止后人工处理。与不遵守协议的旧版 writer 共用时，仍不得声明专用目录契约。
 
 MIT，见 `LICENSE`。
