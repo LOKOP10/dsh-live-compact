@@ -1142,6 +1142,12 @@ function rotateShadowLocked({
   const validBytes = [used, incomingBytes, cap].every(Number.isSafeInteger) && used >= 0 && incomingBytes >= 0 && cap > 0;
   const usage = exclusive && complete && validBytes ? { root, identity, cap, bytes: used } : null;
   shadowUsage = usage;
+  // Missing entries make used a lower bound, never evidence of free space.
+  // Refuse before deletion as well: a partial scan cannot establish a safe
+  // rotation, even when the incoming backup qualifies for the oversize rule.
+  if (!complete) {
+    return { ok: false, deleted: 0, freed: 0, used, cap, oversize, failed: true };
+  }
   if (!oversize && used + incomingBytes <= cap) {
     return { ok: true, deleted: 0, freed: 0, used, cap, oversize: false, failed: false };
   }

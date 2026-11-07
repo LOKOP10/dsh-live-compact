@@ -637,10 +637,10 @@ test("a normal raw helper infers its configured root before the session director
   assert.equal(rotation(f).estimated, true);
 });
 
-for (const failedPart of ["root readdir", "session readdir", "stat"]) {
-  test(`incomplete ${failedPart} never seeds an estimate`, (t) => {
+for (const optIn of [false, true]) for (const failedPart of ["root readdir", "session readdir", "stat"]) {
+  test(`incomplete ${failedPart} refuses admission and never seeds an estimate (${optIn ? "dedicated" : "shared"})`, (t) => {
     const f = fixture(t);
-    configure(t, f);
+    configure(t, f, optIn);
     const file = plant(f, "dead/cut-1-11111111.txt", 900);
     const bad = failedPart === "stat" ? { stat() { throw new Error("EACCES"); } } : {
       readdir(path, options) {
@@ -648,12 +648,43 @@ for (const failedPart of ["root readdir", "session readdir", "stat"]) {
         return f.io.readdir(path, options);
       },
     };
-    rotation(f, 0, bad);
+    for (const incoming of [0, 200, 1100]) {
+      const failed = rotation(f, incoming, bad);
+      assert.equal(failed.ok, false, "an unreadable payload cannot establish capacity, including the oversize exception");
+      assert.equal(failed.failed, true);
+      assert.equal(failed.estimated, undefined);
+      assert.equal(failed.deleted, 0);
+      assert.equal(failed.freed, 0);
+      assert.equal(statSync(file).size, 900);
+      assert.deepEqual(f.calls.unlink, [], "partial scans must not start deleting");
+    }
     const retry = rotation(f, 200);
     assert.equal(retry.estimated, undefined);
     assert.equal(retry.ok, true);
     assert.equal(retry.freed, 900);
     assert.deepEqual(f.calls.unlink, [file]);
+  });
+}
+
+for (const optIn of [false, true]) {
+  test(`failed capacity scan prevents a real 900 + 200 save at cap 1000 (${optIn ? "dedicated" : "shared"})`, (t) => {
+    const f = fixture(t);
+    configure(t, f, optIn);
+    const old = plant(f, "cut-9-11111111.txt", 900);
+    const originalStat = f.io.stat;
+    f.io.stat = (path) => {
+      if (path === old) throw Object.assign(new Error("unreadable backup"), { code: "EACCES" });
+      return originalStat(path);
+    };
+    assert.throws(() => backup(f, 200), /backup is full/);
+    assert.equal(existsSync(join(f.dir, "mine", "cut-1-aaaaaaaa.txt")), false);
+    assert.equal(listShadowEntries(f.dir).reduce((sum, file) => sum + file.size, 0), 900);
+    assert.deepEqual(f.calls.unlink, []);
+    f.io.stat = originalStat;
+    const healthy = backup(f, 200);
+    assert.equal(statSync(healthy.file).size, 200);
+    assert.equal(existsSync(old), false);
+    assert.equal(rotation(f).used, 200);
   });
 }
 
