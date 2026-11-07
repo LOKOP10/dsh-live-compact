@@ -55,13 +55,19 @@ dsh-live-compact --version
 
 `npm run test:gate` 已过。Windows 取权限、宿主不退出、重启只补最近 3 轮、长 `read` 只切自己那一轮，都在这道门禁里。65 万、3.2 万、`CHUNK_MIN` 1000、云端默认值没改。
 
-这轮连的是插件版。10 组同一套 31 轮填日志，组内串行，两个模型同时开。原版 DSH 压缩对比留到 1.1.2。Coder 390 27B 这轮没跑，后补。测评图随后附在 [v1.1.1](https://github.com/Tranquillitatis-Lab/dsh-live-compact/releases/tag/v1.1.1)。
+这轮连的是插件版。10 组同一套 31 轮填日志，组内串行，两个模型同时开。原版 DSH 压缩对比留到 1.1.2。Coder 390 27B 这轮没跑，后补。测评图在下面，也在 [v1.1.1](https://github.com/Tranquillitatis-Lab/dsh-live-compact/releases/tag/v1.1.1)。
 
 云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。这个命中是这些首步的 `cacheRead / (cacheRead + input)` 加总。切掉的 token 是 `spine-cuts.jsonl` 里 `saved` 的合计。含切刀的轮是这些轮的墙钟合计，刀本身是毫秒。任务墙钟从第 1 轮文件生成算到第 31 轮写完。结束上下文是最后一轮的 `totalTokens`，已经包含前面各轮，不是每轮增量。
 
 DS V4.1 Flash，10 组，填日志 230/230，跳过 0。首步缓存 98.64%。切掉 65180。10 组墙钟合计 36 分 18 秒。多数组结束在 3.5 万到 4.6 万。第 1 组 `read` 全文 25 次，正文留在上下文里，四刀只省 21493，结束 282871。第 2 组几乎只用 bash，只 `read` 一次，没切，结束 37781。
 
 GLM 5.3 Flash，同一插件、同一套题。第 1、2、3、4、8、9、10 组填日志 23/23。第 5、6 组全程连接失败，不计入。第 7 组前段连接失败，填日志 14/23，不算通过。不要写成 230/230。有用量的轮首步缓存 98.97%。第 1、2 组主要是 grep，没切，结束 39511 和 29987。插件没有把 GLM 切得更多。第 4、9 组也反复 `read` 全文，结束 285535 和 281515，和第 1 组 DS 是同一种形状。可比的 7 组里，DS 每组都更快。
+
+![插件版对比](docs/slide-111-overview.jpg)
+
+![DS V4.1 Flash](docs/slide-111-ds.jpg)
+
+![GLM 5.3 Flash](docs/slide-111-glm.jpg)
 
 ## 1.0.9
 
