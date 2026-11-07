@@ -194,7 +194,12 @@ forms (`-v`, `%n`) fail. Status expansion is limited to output-only printf and
 moves with unproven executable identity remain opaque outside the verified
 archive exception, as does command resolution outside trusted system paths.
 Read-only standard-library Python/CSV and structured read/grep/write/edit remain
-supported. Bash accepts optional nonblank string `description` as UI metadata
+supported. Python imports cannot rename members to another recognized builtin
+or reader name. Pattern matching, exception-handler bindings and type aliases
+are outside this small language and require command review. Binding checks must
+also pass on Python 3.10+; a Python 3.9 syntax rejection alone is not evidence
+that a newer grammar cannot bypass the audit.
+Bash accepts optional nonblank string `description` as UI metadata
 only; it grants no execution permission. Unknown or unsupported input keys fail.
 Dynamic expansion, arbitrary scripts/interpreters, unsupported
 options/code/tool schemas and ambiguous behavior hard-fail as requiring command

@@ -585,13 +585,24 @@ class FullCellTests(unittest.TestCase):
                         self.assertIn('g1/t30: forbidden part log reread', report['quality_errors'])
 
     def test_turn29_import_aliases_cannot_hide_reads_in_complete_evidence(self):
+        commands = [(f"python3 -c 'from pathlib import Path as {alias}; "
+                     f'{alias}("part" + "14.log").read_text()' + "'")
+                    for alias in ('str', 'print', 'open', 'reader', 'read_text')]
+        self.assert_turn29_behavior_rejected(commands)
+
+    def test_turn29_pattern_bindings_cannot_hide_reads_in_complete_evidence(self):
+        self.assert_turn29_behavior_rejected([
+            "python3 -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
+            "python3 -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
+        ])
+
+    def assert_turn29_behavior_rejected(self, commands):
         group = self.root/'runs/spine-1'
         path = group/'t29.jsonl'
         original = [json.loads(x) for x in path.read_text().splitlines()]
-        for alias in ('str', 'print', 'open', 'reader', 'read_text'):
-            command = (f"python3 -c 'from pathlib import Path as {alias}; "
-                       f'{alias}("part" + "14.log").read_text()' + "'")
-            with self.subTest(alias=alias), contextlib.ExitStack() as logs:
+        for command in commands:
+            with self.subTest(command=command), contextlib.ExitStack() as logs:
                 items = copy.deepcopy(original)
                 items[3:3] = [dict(type='tool_call', callId='alias-read', tool='bash',
                                   input={'command':command, 'workdir':str(self.root/'work/spine-1')}),

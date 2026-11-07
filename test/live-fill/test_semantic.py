@@ -254,17 +254,28 @@ class SemanticTests(unittest.TestCase):
                         verify(self.policy, self.packet, self.mapping, self.receipts)
 
     def test_turn29_import_alias_rereads_are_nonwaivable(self):
+        commands = [(f"python3 -c 'from pathlib import Path as {alias}; "
+                     f'{alias}("part" + "14.log").read_text()' + "'")
+                    for alias in ('str', 'print', 'open', 'reader', 'read_text')]
+        self.assert_turn29_behavior_nonwaivable(commands)
+
+    def test_turn29_pattern_capture_rereads_are_nonwaivable(self):
+        self.assert_turn29_behavior_nonwaivable([
+            "python3 -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
+            "python3 -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
+        ])
+
+    def assert_turn29_behavior_nonwaivable(self, commands):
         path = self.roots['ds/candidate'] / 'runs/spine-1/t29.jsonl'
         original = [json.loads(x) for x in path.read_text().splitlines()]
-        for alias in ('str', 'print', 'open', 'reader', 'read_text'):
-            command = (f"python3 -c 'from pathlib import Path as {alias}; "
-                       f'{alias}("part" + "14.log").read_text()' + "'")
+        for command in commands:
             items = copy.deepcopy(original)
             items[3:3] = [dict(type='tool_call', callId='alias-reread', tool='bash',
                               input={'command':command}),
                           dict(type='tool_result', callId='alias-reread', status='completed',
                                result='[exit code: 0]')]
-            with self.subTest(alias=alias), self.changed_events(path, items):
+            with self.subTest(command=command), self.changed_events(path, items):
                 with self.assertRaisesRegex(ValueError, 'hard evidence/tool/behavior failure'):
                     verify(self.policy, self.packet, self.mapping, self.receipts)
 

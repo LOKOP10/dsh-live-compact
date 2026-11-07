@@ -110,7 +110,11 @@ def python_errors(source, turn):
                 if module not in PY_IMPORTS or (isinstance(node, ast.ImportFrom) and
                         (node.level or alias.name not in PY_IMPORTS.get(module, set()))):
                     bad.append(OPAQUE)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)) or (
+        # These constructs have binding fields outside Name(Store), including
+        # MatchAs.name/MatchMapping.rest and ExceptHandler.name. They are outside
+        # this literal reader language; never let them redefine recognized calls.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                             ast.ExceptHandler)) or type(node).__name__ in ('Match', 'TypeAlias') or (
                 isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
             bad.append(OPAQUE)
         if isinstance(node, (ast.Name, ast.Attribute)):
