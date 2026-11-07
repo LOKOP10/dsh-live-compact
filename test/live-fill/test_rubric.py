@@ -712,8 +712,9 @@ class ToolEvidenceTests(unittest.TestCase):
         extra = []
         for index, text in enumerate([command] if isinstance(command, str) else command):
             call_id = f'audit-{index}'
-            extra += [dict(type='tool_call', callId=call_id, tool='bash', input={
-                'command':text, 'description':'Synthetic audit regression', 'workdir':str(self.cwd)}),
+            call = dict(tool='bash', input={
+                'command':text, 'description':'Synthetic audit regression', 'workdir':str(self.cwd)}) if isinstance(text, str) else text
+            extra += [dict(type='tool_call', callId=call_id, **call),
                 dict(type='tool_result', callId=call_id, status='completed', result='[exit code: 0]')]
         items[5:5] = extra
         parsed = self.parsed(items, 14)
@@ -727,6 +728,87 @@ class ToolEvidenceTests(unittest.TestCase):
             snapshot['files'][path] = sha(text.encode())
             snapshot['texts'][path] = text
         return behavior(14, parsed['calls'], snapshot, self.initial, cwd=self.cwd)
+
+    def test_complete_turn14_reader_options_preserve_pipeline_input(self):
+        for reader in ('tail -n +1', 'tail -n 1', 'tail -n+1', 'tail -c +1',
+                       'tail --lines=+1', 'tail --bytes +1', 'tail -1',
+                       'head -n 2', 'head -n2', 'head -c 20', 'head --lines 2',
+                       'cat -n', 'wc -l', 'sort -n', 'uniq -c',
+                       "sed -n '1p'", "awk '{print $1}'"):
+            pipeline = 'cat sample.csv | '+reader
+            with self.subTest(reader=reader):
+                self.assertIn('unauditable CSV regex/split parsing',
+                              self.audit_turn14(pipeline+" | grep ','"))
+            for redirect in ('>', '>>', '1>'):
+                writer = pipeline+f' {redirect} scratch.txt'
+                for commands in (writer+"; grep ',' < scratch.txt",
+                                 [writer, "grep ',' scratch.txt"]):
+                    with self.subTest(commands=commands):
+                        self.assertIn(OPAQUE, self.audit_turn14(
+                            commands, written_files={'scratch.txt':'a,b\n1,2\n'}))
+        # A filename alongside the reader must not silently erase known/opaque
+        # pipeline input. The bounded audit may conservatively retain it.
+        for producer in ('cat sample.csv', "python3 -c 'print(\"a,b\")'"):
+            for reader in ('tail -n +1', 'cat part14.log', 'head -n 2 part14.log',
+                           'tail -n +1 part14.log', 'sort part14.log', 'wc -l part14.log'):
+                with self.subTest(producer=producer, reader=reader):
+                    self.assertTrue(self.audit_turn14(producer+' | '+reader+" | grep ','"))
+        for reader in ('tail -n', 'tail -n nope', 'tail --lines=nope',
+                       'head --unknown 1', 'wc --files0-from=-'):
+            with self.subTest(reader=reader):
+                self.assertIn(OPAQUE, self.audit_turn14('cat sample.csv | '+reader+" | grep ','"))
+
+    def test_complete_turn14_preserves_literal_reader_operands_after_double_dash(self):
+        for reader in ('cat -- -sample.csv part14.log', 'head -n 2 -- -sample.csv part14.log',
+                       'tail -n +1 -- -sample.csv part14.log', 'wc -l -- -sample.csv part14.log',
+                       'sort -- -sample.csv part14.log', 'uniq -- -sample.csv',
+                       "grep -- ',' -sample.csv part14.log", "rg -- ',' -sample.csv part14.log",
+                       "sed -n '1p' -- -sample.csv part14.log"):
+            for prefix in ('', "printf 'a,b\\n1,2\\n' > ./-sample.csv; "):
+                with self.subTest(reader=reader, prefix=prefix):
+                    self.assertTrue(self.audit_turn14(prefix+reader+" | grep ','"))
+                writer = prefix+reader+' > scratch.txt'
+                for commands in (writer+"; grep ',' < scratch.txt",
+                                 [writer, "grep ',' < scratch.txt"],
+                                 [writer, "cat scratch.txt | grep ','"]):
+                    with self.subTest(commands=commands):
+                        self.assertTrue(self.audit_turn14(commands, written_files={
+                            '-sample.csv':'a,b\n1,2\n', 'scratch.txt':'a,b\n1,2\n'}))
+        for command in ("cat -- -n.csv part14.log | grep ','",
+                        "cat -- --sample.CSV part14.log | grep ','",
+                        "grep -n -- ',' -n.csv part14.log", "grep -- ',' -n.csv part14.log",
+                        "cat -- .env part14.log", "cat -- -n .env", "cat -- 123 .env"):
+            with self.subTest(command=command):
+                self.assertTrue(self.audit_turn14(command))
+
+    def test_complete_turn14_builtin_grep_uses_shared_csv_predicate(self):
+        for path in ('.CSV', 'sample.CSV', '.csv', '.cSv', 'sample.cSv',
+                     './.CSV', './sample.CSV/.', 'nested/.CSV', 'nested/sample.cSv'):
+            call = {'tool':'grep', 'input':{'path':path, 'pattern':','}}
+            with self.subTest(path=path):
+                self.assertIn('unauditable CSV regex/split parsing', self.audit_turn14([call]))
+                self.assertEqual(tool_errors(call, 6), [])
+                self.assertIn('unauditable CSV regex/split parsing',
+                              self.audit_turn14("grep ',' "+path))
+
+    def test_complete_turn14_reader_option_and_redirect_controls(self):
+        for command in ('cat part14.log | tail -n +1 | grep WARN',
+                        'cat part14.log | head -n2 | grep WARN',
+                        "printf 'WARN literal\\n' | tail -n +1 | grep WARN",
+                        'cat -- -notes.log part14.log', 'cat -- -n part14.log',
+                        'cat -- 123 part14.log', 'cat 123',
+                        'head -n 2 -- -notes.log part14.log',
+                        'tail -n +1 -- -notes.log part14.log',
+                        "grep -- '-n' part14.log", "grep -- WARN -n part14.log",
+                        'sort -- -n part14.log', 'uniq -- -c',
+                        "sed -n '1p' -- -notes.log part14.log",
+                        "cat sample.csv | tail -n +1 < part14.log | grep ','",
+                        "python3 -c 'print(\"a,b\")' | tail -n +1 0< part14.log | grep ','",
+                        "cat sample.csv | tail -n +1 < part14.log > scratch.txt; grep ',' < scratch.txt"):
+            with self.subTest(command=command):
+                self.assertEqual(self.audit_turn14(command), [])
+        self.assertEqual(self.audit_turn14([
+            {'tool':'grep', 'input':{'path':'part14.log', 'pattern':'WARN'}}]), [])
 
     def test_complete_turn14_rejects_descriptor_and_leading_slash_aliases(self):
         for path in ('//dev/stdin', '//dev/fd/0', '///dev/stdin', '////dev/fd/0',
