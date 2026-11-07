@@ -212,6 +212,9 @@ sandbox or proof about arbitrary generated programs.
 The bounded shell tokenizer preserves the distinction between words and control
 operators. Backslash-newline continuations, unquoted comments, control characters
 and operator-shaped literal arguments (for example a quoted `>`) are rejected.
+Native `zsh -c/-lc` wrappers are rejected: its default EQUALS and MULTIOS
+semantics are outside this grammar. The pinned DSH local bash executor invokes
+`bash -c`; a terminal's default shell does not select the tool's interpreter.
 Only an unquoted numeric word immediately adjacent to a redirection is an I/O
 descriptor; quoting it or separating it with whitespace leaves an ordinary
 argument. Protected paths are compared case-insensitively as a conservative rule

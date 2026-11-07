@@ -339,6 +339,18 @@ class SemanticTests(unittest.TestCase):
                 export(self.policy,self.blind/'augmented-packet.json',self.base/'augmented-map.json')
             with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):verify(self.policy,self.packet,self.mapping,self.receipts)
 
+    def test_zsh_dialect_is_nonwaivable(self):
+        import shlex
+        path=self.roots['ds/candidate']/'runs/spine-1/t14.jsonl';original=[json.loads(x)for x in path.read_text().splitlines()]
+        baseline=score_cell(self.roots['ds/candidate']);verify(self.policy,self.packet,self.mapping,self.receipts)
+        for index,command in enumerate(['head -c 1 =cat | wc -c','cat < sample.csv < plain.txt | grep ","']):
+            items=copy.deepcopy(original);position=next(i for i,e in enumerate(items)if e.get('phase')=='step_end')
+            items[position:position]=[dict(type='tool_call',callId='dialect',tool='bash',input={'command':'zsh -c '+shlex.quote(command)}),dict(type='tool_result',callId='dialect',status='completed',result='[exit code: 0]')]
+            with self.subTest(command=command),self.changed_events(path,items):
+                report=score_cell(self.roots['ds/candidate']);self.assertTrue(report['evidence_pass'],report['evidence_errors']);self.assertEqual((report['warn_correct'],report['notice_correct']),(baseline['warn_correct'],baseline['notice_correct']))
+                with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):export(self.policy,self.blind/f'zsh-packet-{index}.json',self.base/f'zsh-map-{index}.json')
+                with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):verify(self.policy,self.packet,self.mapping,self.receipts)
+
     def test_absent_full_run_or_stale_run_rejected(self):
         path = self.extra_path
         path.rename(path.with_suffix('.held'))

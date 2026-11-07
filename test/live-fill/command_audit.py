@@ -377,7 +377,8 @@ def simple_audit(words, turn, depth, stdin_paths=UNBOUND_STDIN):
         rest = operands[1:] if operands[:1] == ['--'] else operands
         errors, sources = simple_audit(rest, turn, depth + 1, stdin_paths) if rest and depth < 4 else ([OPAQUE], None)
         return finish(errors, sources)
-    if name in ('sh', 'bash', 'dash', 'zsh'):
+    # Native zsh EQUALS/MULTIOS semantics are outside this Bash/POSIX subset.
+    if name in ('sh', 'bash', 'dash'):
         errors, sources = shell_audit(operands[1], turn, depth + 1, stdin_paths) if len(operands) == 2 and operands[0] in ('-c', '-lc') else ([OPAQUE], None)
         return finish(errors, sources)
     if name in ('python', 'python3'):

@@ -704,6 +704,14 @@ class FullCellTests(unittest.TestCase):
             self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
             self.assertFalse(report['hard_quality_pass'])
 
+    def test_zsh_dialect_bypasses_hard_fail_correct_cell(self):
+        import shlex
+        for command in ['head -c 1 =cat | wc -c','cat < sample.csv < plain.txt | grep ","']:
+            with self.subTest(command=command),self.injected_turn(14,[dict(tool='bash',input={'command':'zsh -c '+shlex.quote(command)})])as report:
+                self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+                self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+                self.assertFalse(report['hard_quality_pass'])
+
     def test_candidate_wrong_nonzero_stock_wrong_reported(self):
         for root in (self.root,self.stock):
             with self.bad_answer(root):

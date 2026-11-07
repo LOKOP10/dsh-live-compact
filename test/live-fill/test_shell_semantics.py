@@ -70,3 +70,17 @@ class ShellSemanticsTests(unittest.TestCase):
             root=Path(temp);(root/'conf').mkdir();file=root/'conf/settings.toml';file.write_text('port = 8642')
             for path in ['CONF/SETTINGS.TOML','Conf/Settings.toml','conf/settings.toml']:
                 self.assertIn('forbidden protected path write',tool_errors({'tool':'write','input':{'file_path':path,'content':'port = 1'}},14,cwd=root))
+
+    def test_native_zsh_equals_and_multios_are_not_bash_grammar(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'sample.csv').write_text('a,b'+chr(10)+'1,2'+chr(10));(root/'plain.txt').write_text('plain'+chr(10))
+            variants=['head -c 1 =cat | wc -c','cat < sample.csv < plain.txt | grep ","']
+            actual=[]
+            for command in variants:
+                actual.append(subprocess.check_output(['/bin/zsh','-f','-c',command],cwd=root,env={'PATH':'/usr/bin:/bin'},text=True,timeout=10))
+            self.assertEqual(actual[0].strip(),'1');self.assertEqual(actual[1],'a,b'+chr(10)+'1,2'+chr(10))
+            for command in variants:
+                with self.subTest(command=command):self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':'zsh -c '+shlex.quote(command)}},14,cwd=root))
+            # Bash selects only the final stdin redirect; never attribute this
+            # different behavior to the grammar used by the actual DSH tool.
+            self.assertEqual(self.bash(root,'cat < sample.csv < plain.txt'),'plain'+chr(10))
