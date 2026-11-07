@@ -818,6 +818,10 @@ check("p0-18 settings UI ships through native client slots", () => {
   assert.match(source, /SettingsFormModel/);
   assert.match(source, /settingsNumberField/);
   assert.match(source, /configForms/);
+  assert.match(source, /SettingsValueField/);
+  assert.match(source, /props\.edit\(name, text\)/);
+  assert.match(source, /hooks: \{ liveCompact: store \}/);
+  assert.match(source, /model\.dispose\(\)/);
   assert.equal(/^\s*(?:import|export)\s/m.test(source), false);
   assert.equal(/from\s*["']@deepseek-ai\//.test(source), false);
 });

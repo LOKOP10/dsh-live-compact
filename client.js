@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
      * Native configForms + SettingsFormModel + settingsNumberField; no JSX, no build step.
      */
     const React = require("react");
-    const { SettingsFormModel, settingsNumberField } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
 
     const NS = "compaction-spine";
@@ -45,9 +45,11 @@ window.__ModuleLoader__.load({
       advanced: "高级设置",
       save: "保存",
       saving: "保存中…",
-      discard: "放弃修改",
-      invalid: "有值不合法",
+      invalid: "请填数字；留空表示使用默认值。",
       unavailable: "当前配置不可写",
+      saveFailed: "保存失败，修改已保留，请检查后重试。",
+      overridden: "已覆盖",
+      reset: "恢复默认",
       unavailableHost: "宿主没有提供这一项配置",
     };
     const en = {
@@ -56,74 +58,52 @@ window.__ModuleLoader__.load({
       advanced: "Advanced",
       save: "Save",
       saving: "Saving…",
-      discard: "Discard",
-      invalid: "A value is invalid",
+      invalid: "Enter a number, or leave blank to use the default.",
       unavailable: "Configuration is not writable",
+      saveFailed: "Save failed; your edits have been kept.",
+      overridden: "Overridden",
+      reset: "Reset to default",
       unavailableHost: "The host does not serve this namespace",
     };
 
-    const rowStyle = { display: "flex", gap: "0.75rem", alignItems: "center", margin: "0.35rem 0" };
-
-    function createUi(ctx, t) {
-      const model = new SettingsFormModel(
-        ctx.configForms.get(NS),
-        KEYS.map((key) => settingsNumberField(key)),
-      );
-      const read = () => ({
-        shell: model.shell(),
-        fields: Object.fromEntries(KEYS.map((key) => [key, model.field(key)])),
+    function SettingsPage(props) {
+      const { t } = props;
+      const state = props.useLiveCompact((snapshot) => snapshot);
+      if (props.view === "summary") return t("summary");
+      const section = (group) => group.keys.map((name) => {
+        const [label, hint] = LABELS[name];
+        return h(SettingsValueField, {
+          key: name,
+          id: `live-compact-${name}`,
+          label,
+          hint,
+          numeric: true,
+          disabled: !state.writable || state.saving,
+          overriddenLabel: t("overridden"),
+          resetLabel: t("reset"),
+          invalidLabel: t("invalid"),
+          ...state[name],
+          onEdit: (text) => props.edit(name, text),
+          onReset: () => props.resetField(name),
+        });
       });
-      const store = model.bind(read);
-
-      function Field(props) {
-        const { name, field, disabled } = props;
-        const [label, hint] = LABELS[name] || [name, ""];
-        return h("label", { style: rowStyle },
-          h("span", { style: { flex: "0 0 12rem" } }, t(label) === label ? label : t(label)),
-          h("input", {
-            type: "number",
-            value: field && field.text !== undefined ? field.text : "",
-            disabled: disabled || !(field && field.writable),
-            onChange: (event) => model.actions().edit(field, event.target.value),
-          }),
-          h("span", { style: { opacity: 0.6, fontSize: "0.85em" } }, hint),
-          field && field.error ? h("span", { style: { color: "var(--dsw-alias-state-error-primary)" } }, String(field.error)) : null);
-      }
-
-      function SettingsForm() {
-        const [snapshot, setSnapshot] = React.useState(read);
-        React.useEffect(() => {
-          const unsubscribe = store.subscribe(() => setSnapshot(read()));
-          return typeof unsubscribe === "function" ? unsubscribe : undefined;
-        }, []);
-        const { shell, fields } = snapshot;
-        if (!shell.available) return h("p", { role: "status" }, t("unavailableHost"));
-        const section = (group) => group.keys.map((name) =>
-          h(Field, { key: name, name, field: fields[name], disabled: !shell.writable }));
-        return h("form", {
-          onSubmit: (event) => {
-            event.preventDefault();
-            void model.save();
-          },
+      return h(SettingsForm, {
+        state,
+        labels: {
+          unavailable: t("unavailableHost"),
+          readOnly: t("unavailable"),
+          saveFailed: t("saveFailed"),
+          save: t("save"),
+          saving: t("saving"),
         },
-        h("h4", { style: { margin: "0 0 0.5rem" } }, t("basic")),
-        section(GROUPS[0]),
-        h("details", { style: { marginTop: "0.75rem" } },
-          h("summary", { style: { cursor: "pointer" } }, t("advanced")),
-          section(GROUPS[1])),
-        h("div", { style: { display: "flex", gap: "0.5rem", marginTop: "0.75rem" } },
-          h("button", { type: "submit", disabled: !shell.writable || shell.saving || shell.invalid },
-            t(shell.saving ? "saving" : "save")),
-          h("button", {
-            type: "button",
-            disabled: shell.saving || !shell.dirty,
-            onClick: () => model.actions().discard(),
-          }, t("discard"))),
-        shell.invalid ? h("p", { role: "status" }, t("invalid")) : null,
-        !shell.writable ? h("p", { role: "status" }, t("unavailable")) : null);
-      }
-
-      return { model, SettingsForm };
+        onSave: props.save,
+        onDiscard: props.discard,
+      },
+      h("h4", null, t("basic")),
+      section(GROUPS[0]),
+      h("details", null,
+        h("summary", null, t("advanced")),
+        section(GROUPS[1])));
     }
 
     return {
@@ -131,11 +111,21 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const t = ctx.locale.bind("liveCompact");
         ctx.effect(() => ctx.locale.register("liveCompact", { zh, en }), "live-compact: settings dictionary");
-        const { SettingsForm } = createUi(ctx, t);
-        ctx.effect(() => ctx.slots.inject("plugins.row.config", () => ctx.slots.register(
-          { name: "plugins.row.config", key: "dsh-live-compact#compaction-spine", locale: "liveCompact" },
-          (props) => (props.view === "summary" ? h("span", null, props.t("summary")) : h(SettingsForm)),
-        )), "live-compact: settings page");
+        const model = new SettingsFormModel(ctx.configForms.get(NS), KEYS.map(settingsNumberField));
+        const store = model.bind(() => ({
+          ...model.shell(),
+          ...Object.fromEntries(KEYS.map((name) => [name, model.field(name)])),
+        }));
+        ctx.effect(() => () => model.dispose(), "live-compact: form subscription");
+        ctx.effect(() => ctx.configForms.whileServed([NS], () => ctx.slots.inject("plugins.row.config", () => ctx.slots.register(
+          {
+            name: "plugins.row.config",
+            key: "dsh-live-compact#compaction-spine",
+            locale: "liveCompact",
+            inject: () => ({ hooks: { liveCompact: store }, ...model.actions() }),
+          },
+          SettingsPage,
+        ))), "live-compact: settings page");
       },
     };
   },
