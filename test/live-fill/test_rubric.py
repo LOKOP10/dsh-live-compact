@@ -162,12 +162,41 @@ class AnswerGrammarTests(unittest.TestCase):
             with self.subTest(turn=turn, extra=extra):
                 self.assertTrue(fill_answer(f'WARN: {3+turn%9}\nNONE\n'+extra, turn))
 
+    def test_warn_annotations_surround_the_entire_counted_noun(self):
+        for noun in ('WARN', 'WARN line', 'WARN lines', 'WARN entry', 'WARN entries',
+                     'WARN rows', 'WARN records', 'WARN messages',
+                     '条 WARN', '行 WARN', '条目 WARN', 'WARN 条', 'WARN行'):
+            for before, after, valid in (
+                ('', ' (or 6)', False),
+                ('', '（或 6 条）', False),
+                ('', ' (all ledger drift (or 6))', False),
+                ('', ' (all ledger drift; or 6)', False),
+                ('', ' (all ledger drift) (or 6)', False),
+                ('', ' (all ledger drift）', False),
+                ('', ' (all ledger drift', False),
+                (' (all ledger drift)', ' (or 6)', False),
+                (' (or 6)', ' (all ledger drift)', False),
+                ('', ', or 6', False),
+                ('', '，或 6 条', False),
+                ('', ' / 6', False),
+                (' (all ledger drift)', '', True),
+                ('', ' (all ledger drift)', True),
+                ('（均为 ledger drift）', ' (same category)', True),
+                ('', '. Other INFO entries number 6', True),
+            ):
+                extra = f'There are 5{before} {noun}{after}.'
+                with self.subTest(extra=extra):
+                    errors = fill_answer('WARN: 5\nNONE\n'+extra, 2)
+                    self.assertEqual(not errors, valid)
+                    self.assertTrue(all(error.startswith('WARN ') for error in errors))
+
     def test_deep_warn_parentheticals(self):
         for depth in (3, 40, 128):
             for left, right in (('(', ')'), ('（', '）')):
                 for explanation, valid in (('all ledger drift', True), ('or 6', False)):
                     value = '5 '+left*depth+explanation+right*depth
-                    for extra in (f'The WARN count is {value}.', f'There are {value} WARN lines.'):
+                    for extra in (f'The WARN count is {value}.', f'There are {value} WARN lines.',
+                                  f'There are 5 WARN lines {left*depth}{explanation}{right*depth}.'):
                         with self.subTest(depth=depth, extra=extra):
                             self.assertEqual(not fill_answer('WARN: 5\nNONE\n'+extra, 2), valid)
 
@@ -360,6 +389,29 @@ class ToolEvidenceTests(unittest.TestCase):
                 self.assertTrue(parsed['warn_correct'])
                 self.assertTrue(parsed['notice_correct'])
                 self.assertEqual(len(parsed['usage']), 2)
+
+    def test_parser_audits_counted_noun_postfixes(self):
+        for extra, valid in (
+            ('There are 5 WARN lines (or 6).', False),
+            ('共有 5 条 WARN（或 6 条）。', False),
+            ('There are 5 WARN entries (all ledger drift (or 6)).', False),
+            ('There are 5 WARN lines, or 6.', False),
+            ('共有 5 行 WARN，或 6 行。', False),
+            ('There are 5 WARN lines (all ledger drift).', True),
+            ('共有 5 条 WARN（均为 ledger drift）。', True),
+            ('Summary (There are 5 WARN lines (all ledger drift)).', True),
+        ):
+            for supplemental in (extra, extra+' Example: WARN ledger drift turn=2 n=0'):
+                with self.subTest(extra=supplemental):
+                    items = events(2, self.cwd, 'sid')
+                    items[-1]['text'] += '\n'+supplemental
+                    parsed = self.parsed(items, 2)
+                    self.assertEqual(parsed['evidence_errors'], [])
+                    self.assertEqual(parsed['quality_errors'], [] if valid else ['WARN contradictory supplemental count'])
+                    self.assertTrue(parsed['expected_read'])
+                    self.assertEqual(parsed['warn_correct'], valid)
+                    self.assertTrue(parsed['notice_correct'])
+                    self.assertEqual(len(parsed['usage']), 2)
 
     def test_real_check_redirections_and_captured_exit(self):
         out, err = self.cwd/'check_out.txt', self.cwd/'check_err.txt'

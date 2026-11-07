@@ -106,9 +106,10 @@ def warn_claim_values(line):
 
 
 def counts_before_warn(line):
-    """Scan nested annotations without a backtracking parenthesis regex."""
-    for match in re.finditer(r'\d+', line):
-        end, depth = match.end(), 0
+    """Audit adjacent annotations on both sides of the whole counted noun."""
+    def annotation_end(start):
+        # Locate nested spans; warn_value checks bracket pairing and content.
+        end, depth = start, 0
         while end < len(line):
             char = line[end]
             if char in '(（':
@@ -118,8 +119,22 @@ def counts_before_warn(line):
             elif not depth and not char.isspace():
                 break
             end += 1
-        if re.match(r'(?:条\s*)?WARN\b', line[end:], re.I):
-            yield line[match.start():end]
+        return end
+
+    noun = re.compile(r'(?:条目|条|行)?\s*WARN(?![a-zA-Z0-9_])'
+                      r'(?:\s*(?:条目|条|行)|\s+(?:lines?|entr(?:y|ies)|rows?|records?|messages?)\b)?', re.I)
+    for match in re.finditer(r'\d+', line):
+        before_end = annotation_end(match.end())
+        counted = noun.match(line, before_end)
+        if counted:
+            after_end = annotation_end(counted.end())
+            # A nearby alternative belongs to this claim; stop at sentence or
+            # clause boundaries rather than consuming unrelated later prose.
+            alternative = re.match(r'[,，:：]?\s*(?:'+ALTERNATIVE+r'|/)\s*\d+',
+                                   line[after_end:], re.I)
+            if alternative:
+                after_end += alternative.end()
+            yield line[match.start():before_end] + line[counted.end():after_end]
 
 
 def fill_answer(text, turn):
