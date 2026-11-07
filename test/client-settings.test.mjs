@@ -60,7 +60,7 @@ class ContractModel {
     if (!this.scope.getSnapshot().writable) return;
     this.saving = true; this.publish();
     const ops = [...this.drafts].map(([name, text]) => text === ""
-      ? { op: "unset", path: [name] } : { op: "set", path: [name], value: Number(text) });
+      ? { op: "unset", path: [name] } : { op: "set", path: [name], value: name === "takeoverPresets" ? text === "true" : Number(text) });
     const accepted = await this.scope.mutate(ops, this.scope.getSnapshot().revision);
     this.failed = !accepted;
     if (accepted) this.drafts.clear();
@@ -82,7 +82,7 @@ if (upstream) {
 
 function harness({ writable = true, accept = true } = {}) {
   let snapshot = { status: "ready", writable, revision: 7, base: {}, user: {},
-    value: { minTokens: 20000, pointerTokens: 40000, keepRounds: 3,
+    value: { takeoverPresets: true, minTokens: 20000, pointerTokens: 40000, keepRounds: 3,
       chunkMin: 1000, chunkMax: 32000, keepRoundTokens: 32000, bigGate: 650000,
       cooldownMs: 0, thresholdRatio: 0.8, headroomTokens: 65536, retainTokens: 8192, compactionRetries: 0 } };
   const defaults = { ...snapshot.value };
@@ -106,7 +106,8 @@ function harness({ writable = true, accept = true } = {}) {
   };
   function SettingsForm() {}
   function SettingsValueField() {}
-  const primitives = { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField };
+  function Switch() {}
+  const primitives = { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField, Switch };
   const effects = [];
   let bundle;
   let entry;
@@ -151,6 +152,14 @@ function harness({ writable = true, accept = true } = {}) {
     walk(render());
     return result;
   };
+  const presetSwitch = () => {
+    const find = (node) => {
+      if (!node || typeof node !== "object") return undefined;
+      if (node.type === Switch) return node.props;
+      return (node.children ?? []).map(find).find(Boolean);
+    };
+    return find(render());
+  };
   const save = () => new Promise((resolve) => {
     const store = face.hooks.liveCompact;
     const unsubscribe = store.subscribe(() => {
@@ -158,7 +167,7 @@ function harness({ writable = true, accept = true } = {}) {
     });
     render().props.onSave();
   });
-  return { entry, render, fields, face, writes, save, snapshot: () => snapshot,
+  return { entry, render, fields, presetSwitch, face, writes, save, snapshot: () => snapshot,
     dispose: () => { for (const dispose of effects.reverse()) dispose(); }, listeners };
 }
 
@@ -221,6 +230,20 @@ test("host refusal preserves drafts and exposes save failure", async () => {
   await ui.save();
   assert.equal(ui.render().props.state.failed, true);
   assert.equal(ui.fields()[0].text, "25000");
+  ui.dispose();
+});
+
+test("preset takeover switch stages and saves a boolean, not a string", async () => {
+  const ui = harness();
+  assert.equal(ui.presetSwitch().checked, true);
+  ui.presetSwitch().onChange(false);
+  assert.equal(ui.presetSwitch().checked, false);
+  assert.equal(ui.writes.length, 0);
+  await ui.save();
+  assert.deepEqual(ui.writes[0], { revision: 7, ops: [
+    { op: "set", path: ["takeoverPresets"], value: false },
+  ] });
+  assert.equal(ui.snapshot().value.takeoverPresets, false);
   ui.dispose();
 });
 

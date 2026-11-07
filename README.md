@@ -266,14 +266,18 @@ dsh-live-compact --version
 
 ## 设置界面
 
-不自建传输、不打包：表单挂在宿主官方的插件设置页里，数据走官方 `ConfigPageForm`，写入走官方 `form.mutate`，词典走官方 `ctx.locale`。`client.js` 用 `React.createElement` 写，没有 JSX，因此仍然不需要构建步骤。
+不自建传输、不打包：表单挂在宿主官方插件设置页，使用官方 `SettingsFormModel`、`SettingsForm`、`SettingsValueField` 与 `Switch`，写入由模型调用官方 `form.mutate`。词典走 `ctx.locale`，`client.js` 无 JSX，无构建步骤。
+
+包内只注册 **一个组件 `compaction-spine`**。预设接管器保留为内部模块，不再出现独立的 `live-compact-gate` 开关。
 
 分两栏：
 
-- **常用**：起切 token 数（`minTokens`）、大结果只留指针（`pointerTokens`）、保留原文轮数（`keepRounds`）、自动压缩（`auto`）。
+- **常用**：接管官方预设（`takeoverPresets`，默认开启）、起切 token 数（`minTokens`）、大结果只留指针（`pointerTokens`）、保留原文轮数（`keepRounds`）。
 - **高级设置**：`chunkMin`、`chunkMax`、`keepRoundTokens`、`bigGate`、`cooldownMs`，以及官方大压缩的 `thresholdRatio`、`headroomTokens`、`retainTokens`、`compactionRetries`。
 
-改完由宿主重装插件，不用重启。官方大压缩那几项字段名和默认值都没变；只给插件自己的旋钮换了入口。
+**接管官方预设**：开启时，将新加载的 standard/ptc/minimal/cordis 预设内的原版压缩引擎换成本插件；关闭时不改写这些预设，根层压缩仍正常运行。开关保存后影响后续加载的预设，**不会替换已运行会话的引擎**，已有会话需重建。关闭整个插件则同时释放预设接管监听。
+
+设置先留在草稿中，点击保存才写入；恢复默认会在保存时移除该字段的用户覆盖。
 ## 安装
 
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。

@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
      * Native configForms + SettingsFormModel + settingsNumberField; no JSX, no build step.
      */
     const React = require("react");
-    const { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField, Switch } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
 
     const NS = "compaction-spine";
@@ -24,6 +24,11 @@ window.__ModuleLoader__.load({
       },
     ];
     const KEYS = GROUPS.flatMap((group) => group.keys);
+    const PRESET_FIELD = {
+      field: "takeoverPresets",
+      format: (value) => String(value),
+      parse: (text) => ({ kind: "set", value: text === "true" }),
+    };
     const LABELS = {
       minTokens: ["起切 token 数", "默认 20000"],
       pointerTokens: ["大结果只留指针", "0 = 跟随一刀上限"],
@@ -40,6 +45,8 @@ window.__ModuleLoader__.load({
     };
 
     const zh = {
+      takeoverPresets: "接管官方预设",
+      takeoverHint: "将官方预设中的压缩引擎换成本插件。保存后仅影响新加载的预设；已有会话需重建。关闭不影响根层压缩引擎。",
       summary: "20000 起切、3 轮留原文、650000 停",
       basic: "常用",
       advanced: "高级设置",
@@ -53,6 +60,8 @@ window.__ModuleLoader__.load({
       unavailableHost: "宿主没有提供这一项配置",
     };
     const en = {
+      takeoverPresets: "Take over official presets",
+      takeoverHint: "Replace compression inside official presets. Applies to newly loaded presets after saving; recreate existing sessions. The root engine stays active when off.",
       summary: "cuts at 20000, keeps 3 rounds, stops at 650000",
       basic: "Common",
       advanced: "Advanced",
@@ -100,6 +109,15 @@ window.__ModuleLoader__.load({
         onDiscard: props.discard,
       },
       h("h4", null, t("basic")),
+      h("label", { style: { display: "flex", alignItems: "center", gap: "0.75rem" } },
+        t("takeoverPresets"),
+        h(Switch, {
+          label: t("takeoverPresets"),
+          checked: state.takeoverPresets.text === "true",
+          disabled: !state.writable || state.saving,
+          onChange: (checked) => props.edit("takeoverPresets", String(checked)),
+        })),
+      h("p", null, t("takeoverHint")),
       section(GROUPS[0]),
       h("details", null,
         h("summary", null, t("advanced")),
@@ -111,9 +129,10 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const t = ctx.locale.bind("liveCompact");
         ctx.effect(() => ctx.locale.register("liveCompact", { zh, en }), "live-compact: settings dictionary");
-        const model = new SettingsFormModel(ctx.configForms.get(NS), KEYS.map(settingsNumberField));
+        const model = new SettingsFormModel(ctx.configForms.get(NS), [PRESET_FIELD, ...KEYS.map(settingsNumberField)]);
         const store = model.bind(() => ({
           ...model.shell(),
+          takeoverPresets: model.field("takeoverPresets"),
           ...Object.fromEntries(KEYS.map((name) => [name, model.field(name)])),
         }));
         ctx.effect(() => () => model.dispose(), "live-compact: form subscription");

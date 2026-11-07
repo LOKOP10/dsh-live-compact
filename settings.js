@@ -1,5 +1,5 @@
 /**
- * 设置系统。schema 交给宿主官方设置界面自动生成表单，不自写 UI、不写 locale、不发客户端包。
+ * 设置系统。schema、纯配置读取与运行期现值；客户端控件交给宿主官方表单。
  * 这个文件不 import 任何上游包：schema 构造器由 adapter 传进来，取值解析是纯函数，
  * 所以别的插件可以整份拿走用，只改 DEFAULTS 和 ENV 两张表。
  * Settings live in the host's own schema-driven settings page. No upstream imports here.
@@ -77,6 +77,9 @@ export function applySettings(config = {}, env = process.env) {
 export function configSchema(z) {
   const count = (min) => z.number().step(1).min(min);
   return z.object({
+    takeoverPresets: z.boolean().default(true)
+      .description("接管官方预设中的压缩引擎；修改后只影响新加载的预设，已有会话需重建。")
+      .volatile(),
     auto: z.boolean().default(true).volatile(),
     thresholdRatio: z.number().default(0.8).volatile(),
     headroomTokens: count(0).default(65536).volatile(),

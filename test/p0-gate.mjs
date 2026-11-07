@@ -797,6 +797,7 @@ check("p0-17 settings schema owns the plugin knobs", () => {
   const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
   const knobs = ["minTokens", "keepRounds", "keepRoundTokens", "pointerTokens", "chunkMin", "chunkMax", "bigGate", "cooldownMs"];
   for (const key of knobs) assert.equal(plain(shape[key]), DEFAULTS[key], key);
+  assert.equal(plain(shape.takeoverPresets), true);
   for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainTokens", "compactionRetries"]) {
     assert.equal(key in shape, true, key);
   }
@@ -824,6 +825,14 @@ check("p0-18 settings UI ships through native client slots", () => {
   assert.match(source, /model\.dispose\(\)/);
   assert.equal(/^\s*(?:import|export)\s/m.test(source), false);
   assert.equal(/from\s*["']@deepseek-ai\//.test(source), false);
+});
+
+check("p0-18 bundle exposes one component with an internal preset gate", () => {
+  const patch = readFileSync(join(packageRoot, "cordis.patch.yml"), "utf8");
+  assert.equal((patch.match(/name: dsh-live-compact\b/g) ?? []).length, 1);
+  assert.equal(patch.includes("live-compact-gate"), false);
+  assert.match(patch, /takeoverPresets: true/);
+  assert.match(readFileSync(join(packageRoot, "shell.js"), "utf8"), /installPresetGate\(ctx, config\)/);
 });
 
 check("p0-17 config beats env beats default", () => {

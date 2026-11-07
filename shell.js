@@ -8,6 +8,7 @@
  */
 import { loadBase, loadCompaction, loadSchema } from "./adapter.js";
 import { configSchema, engineConfig } from "./settings.js";
+import { installPresetGate } from "./gate.js";
 
 let Engine = null;
 let Stock = null;
@@ -111,6 +112,7 @@ export default class LiveCompactEntry {
   static Config = Schema || Stock?.Config || Engine?.Config;
 
   constructor(ctx, config) {
+    installPresetGate(ctx, config);
     let cause = loadError;
     let skipStock = process.env.SPINE_ENGINE_FAIL === "construct";
     if (skipStock) cause = new Error("spine: constructor refused");
