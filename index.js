@@ -13,13 +13,13 @@
  * Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   discardShadowFiles,
@@ -104,6 +104,13 @@ function cutOk(fn, session, seq) {
   } catch {
     return false;
   }
+}
+
+function restartCaptureCursor(events, keepRounds = KEEP_ROUNDS) {
+  const results = (events || []).filter((event) => event?.type === "tool/result");
+  if (results.length <= keepRounds) return 0;
+  const boundary = results[results.length - keepRounds - 1];
+  return Number.isInteger(boundary?.seq) ? boundary.seq + 1 : 0;
 }
 
 function shadowDirectory() {
@@ -260,9 +267,17 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     const toolCalls = event?.type === "assistant/message"
       ? (event.data?.message?.content || []).filter((block) => block.type === "tool-call").length
       : 0;
-    visible.push({ index, type: event?.type === "tool/result" ? "tool" : "other", toolCalls });
+    const toolCallId = event?.data?.message?.toolCallId || "";
+    const call = toolCallId ? context.calls?.get?.(toolCallId) : null;
+    visible.push({
+      index,
+      type: event?.type === "tool/result" ? "tool" : "other",
+      toolCalls,
+      longRead: event?.type === "tool/result" && call?.name === "read" && (priced[index].tokens || 0) >= CHUNK_MIN,
+    });
   }
   const rounds = keptToolRounds(visible, KEEP_ROUNDS);
+  const newestLong = [...finishedToolRounds(visible)].reverse().find((round) => roundHasLongRead(visible, round));
   const span = rounds.length ? { start: rounds[0].start, end: rounds.at(-1).end } : null;
   const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;
   if (span && cutEnd === null) return null;
@@ -279,7 +294,10 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     }
     if (floorCard >= 0 && end <= floorCard) return null;
   }
-  if (end < first || isCheckpoint(session, nodes[end])) return null;
+  const longSpan = newestLong && visible[newestLong.start].index > floorCard
+    ? { start: visible[newestLong.start].index, end: visible[newestLong.end].index }
+    : null;
+  if (!longSpan && (end < first || isCheckpoint(session, nodes[end]))) return null;
   const spanPieces = (spanStart, spanEnd) => {
     const pieces = [];
     let pendingCommand = "";
@@ -339,7 +357,7 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
       balancedAfter: cutOk(toolPairingBalancedAfter, session, seq),
     };
   });
-  const picked = selectCutIndexes(items, {
+  const cutOptions = {
     engine: context.engine || "cloud",
     chunkMin: CHUNK_MIN,
     chunkMax: CHUNK_MAX,
@@ -348,7 +366,20 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     totalTokens: context.totalTokens,
     drain: context.drain === true,
     urgentTokens: URGENT_TOKENS,
-  });
+  };
+  let usedLongCut = false;
+  let picked = null;
+  if (longSpan) {
+    const longPicked = cutLongReadRound(items, longSpan.start, longSpan.end, cutOptions);
+    if (longPicked && longPicked.start >= longSpan.start && longPicked.end <= longSpan.end) {
+      picked = longPicked;
+      usedLongCut = true;
+    }
+  }
+  if (!picked) {
+    if (end < first || isCheckpoint(session, nodes[end])) return null;
+    picked = selectCutIndexes(items, cutOptions);
+  }
   if (!picked) return null;
   if (picked.pointerOnly) {
     const result = session.eventAt(nodes[picked.end]);
@@ -364,10 +395,12 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
       }
     }
     if (pairStart < 0) return null;
+    if (usedLongCut && pairStart < longSpan.start) return null;
     if (!pointerSpanAllowed(items, pairStart, picked.end, context.engine || "cloud")) return null;
     if (!cutOk(toolPairingBalancedBefore, session, nodes[pairStart])) return null;
     picked.start = pairStart;
   }
+  if (usedLongCut && (picked.start < longSpan.start || picked.end > longSpan.end)) return null;
   const start = picked.start;
   end = picked.end;
   const tokens = items.slice(start, end + 1).reduce((sum, item) => sum + item.tokens, 0);
@@ -402,6 +435,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   constructor(ctx, config) {
     if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
     super(ctx, config);
+    this.persistCapture = true;
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     try {
       const pendingCuts = new Set();
@@ -829,8 +863,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
 
   captureNew(session, events) {
     const key = session?.id || DEFAULT_KEY;
-    let cursor = this.captureCursor.get(key) ?? 0;
-    if (!Array.isArray(events) || events.length < cursor) cursor = 0;
+    let cursor = this.captureCursor.has(key) ? this.captureCursor.get(key) : this.readCaptureCursor(key);
+    if (cursor == null) cursor = restartCaptureCursor(events, KEEP_ROUNDS);
+    if (!Array.isArray(events)) cursor = 0;
+    else if (events.length < cursor) cursor = restartCaptureCursor(events, KEEP_ROUNDS);
     let next = cursor;
     const seen = new Set();
     for (const event of events) {
@@ -847,7 +883,34 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       next = seq + 1;
     }
     this.captureCursor.set(key, next);
+    this.writeCaptureCursor(key, next);
     return seen;
+  }
+
+  readCaptureCursor(key) {
+    if (this.persistCapture !== true) return null;
+    try {
+      const file = join(shadowDirectory(), "spine-capture.json");
+      if (!existsSync(file)) return null;
+      const parsed = JSON.parse(readFileSync(file, "utf8"));
+      const cursor = parsed?.sessions?.[key];
+      return Number.isInteger(cursor) && cursor >= 0 ? cursor : null;
+    } catch {
+      return null;
+    }
+  }
+
+  writeCaptureCursor(key, cursor) {
+    if (this.persistCapture !== true) return;
+    try {
+      const dir = shadowDirectory();
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "spine-capture.json");
+      const parsed = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+      const sessions = parsed?.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {};
+      sessions[key] = cursor;
+      writeFileSync(file, JSON.stringify({ sessions }));
+    } catch {}
   }
 
   captureSession(session) {

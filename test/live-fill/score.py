@@ -49,7 +49,7 @@ def main():
     skip = answered = warn_bad = notice_bad = 0
     hit = miss = fh = fm = 0
     last_totals = []
-    for rid in range(1, 9):
+    for rid in range(1, 11):
         spine_hit = spine_miss = 0
         last27 = None
         for turn in range(1, 32):

@@ -506,9 +506,34 @@ export function latestToolRound(events) {
   return rounds.length ? rounds[rounds.length - 1] : null;
 }
 
+export function cutLongReadRound(items, start, end, options = {}) {
+  if (!Array.isArray(items) || start < 0 || end < start || end >= items.length) return null;
+  const pointerMax = options.pointerMax ?? options.chunkMax ?? 32000;
+  for (let index = end; index >= start; index -= 1) {
+    if (items[index]?.type === "tool" && (items[index].tokens || 0) >= pointerMax) {
+      return { start: index, end: index, pointerOnly: true, gain: 0 };
+    }
+  }
+  const picked = selectCutIndexes(items, {
+    ...options,
+    drain: true,
+    minStart: start,
+    maxEnd: end,
+  });
+  if (!picked || picked.start < start || picked.end > end) return null;
+  return picked;
+}
+
+export function roundHasLongRead(events, round) {
+  for (let index = round.start; index <= round.end; index += 1) {
+    if (events[index]?.longRead) return true;
+  }
+  return false;
+}
+
 export function keptToolRounds(events, limit = 3) {
   const count = Number.isInteger(limit) && limit > 0 ? limit : 3;
-  const rounds = finishedToolRounds(events);
+  const rounds = finishedToolRounds(events).filter((round) => !roundHasLongRead(events, round));
   return rounds.slice(-count);
 }
 
@@ -798,6 +823,7 @@ export function selectCutIndexes(items, {
   chunkMin = 1000,
   chunkMax = 32000,
   pointerMax = chunkMax,
+  minStart = 0,
   maxEnd = null,
   totalTokens,
   drain = false,
@@ -809,13 +835,14 @@ export function selectCutIndexes(items, {
   // Ordinary cloud turns do not cut. The existing 48000 line, or an explicit drain, selects a span.
   const draining = drain || (typeof totalTokens === "number" && totalTokens >= urgentTokens);
   if (cloud && !draining) return null;
+  const lowerBound = Math.max(0, minStart);
   const limit = maxEnd === null ? items.length - 1 : maxEnd;
-  if (limit < 0) return null;
+  if (limit < lowerBound) return null;
   const lastUser = items.reduce((found, item, index) => (item.type === "user" ? index : found), -1);
   const firstUser = items.findIndex((item) => item.type === "user");
   const floor = firstUser >= 0 ? firstUser + 1 : 0;
   const end = walkOffTail(items, limit);
-  if (end < 0) return null;
+  if (end < lowerBound) return null;
   // 切点右边还有卡片，说明这一刀在已缓存前缀里。不切。
   // A checkpoint to the right means this span is inside the cached prefix. Do not cut.
   if (cutCrossesNewerCheckpoint(items, end)) return null;
@@ -823,12 +850,12 @@ export function selectCutIndexes(items, {
     if (lastUser >= 0 && end <= lastUser) return null;
     if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
     if ((items[end].tokens || 0) > chunkMax) return null;
-    const local = expandBack(items, end, Math.max(floor, lastUser), { crossUser: false, chunkMax });
+    const local = expandBack(items, end, Math.max(lowerBound, floor, lastUser), { crossUser: false, chunkMax });
     if (local.gain < chunkMin || !balanced(items, local.start, local.end)) return null;
     return local;
   }
   let pointer = null;
-  for (let index = end; index >= 0; index -= 1) {
+  for (let index = end; index >= lowerBound; index -= 1) {
     if (items[index].checkpoint || items[index].type === "user") break;
     if (items[index].type === "tool" && (items[index].tokens || 0) > pointerMax) {
       pointer = { start: index, end: index, pointerOnly: true, gain: 0 };
@@ -836,7 +863,7 @@ export function selectCutIndexes(items, {
     }
   }
   if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
-  const phase = expandBack(items, end, 0, { crossUser: false, chunkMax });
+  const phase = expandBack(items, end, lowerBound, { crossUser: false, chunkMax });
   // 不够 1000 就停下；不越过卡片或最后一条 user 去找另一段。
   // Under 1000, stop. Do not cross a checkpoint or the last user to find another span.
   if (phase.gain < chunkMin) return pointer;
