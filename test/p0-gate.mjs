@@ -803,9 +803,12 @@ check("p0-18 settings UI ships through native client slots", () => {
   assert.equal(packageJson.dsh.client.platform, "web");
   assert.equal(packageJson.files.includes("client.js"), true);
   const source = readFileSync(join(packageRoot, "client.js"), "utf8");
+  assert.match(source, /window\.__ModuleLoader__\.load\(/);
+  assert.match(source, /require\("react"\)/);
   assert.match(source, /plugins\.row\.config/);
   assert.match(source, /locale\.register/);
   assert.match(source, /form\.mutate/);
+  assert.equal(/^\s*(?:import|export)\s/m.test(source), false);
   assert.equal(/from\s*["']@deepseek-ai\//.test(source), false);
 });
 
