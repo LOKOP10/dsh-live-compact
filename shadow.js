@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  appendFileSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -69,6 +70,7 @@ export function shadowFileBody(sessionKey, body) {
 }
 
 export const STATS_NAME = "spine-stats.json";
+export const CUTS_NAME = "spine-cuts.jsonl";
 
 export function readCutStats(dir) {
   try {
@@ -77,9 +79,79 @@ export function readCutStats(dir) {
       cuts: Number(parsed.cuts) || 0,
       savedTokens: Number(parsed.savedTokens) || 0,
       rewriteTokens: Number(parsed.rewriteTokens) || 0,
+      drains: Number(parsed.drains) || 0,
     };
   } catch {
-    return { cuts: 0, savedTokens: 0, rewriteTokens: 0 };
+    return { cuts: 0, savedTokens: 0, rewriteTokens: 0, drains: 0 };
+  }
+}
+
+export function drainRewrite(notes) {
+  const cuts = (notes || []).filter((note) => note?.kind === "cut" && note.saved > 0);
+  if (!cuts.length) return 0;
+  const later = cuts.slice(1).reduce((sum, note) => sum + (note.saved || 0), 0);
+  return Math.max(0, (cuts[0].afterPrefix || 0) - later);
+}
+
+export function flushDrainStats(dir, notes, meta = {}) {
+  const cuts = (notes || []).filter((note) => note?.kind === "cut" && note.saved > 0);
+  const charged = drainRewrite(notes);
+  const saved = cuts.reduce((sum, note) => sum + note.saved, 0);
+  if (cuts.length) recordDrainStats(dir, { cuts: cuts.length, saved, rewrite: charged });
+  const lines = (notes || []).map((note, index) => JSON.stringify({
+    v: 1,
+    ts: new Date().toISOString(),
+    sid: meta.sid || "",
+    kind: note.kind || "cut",
+    pass: index,
+    drain: meta.drain === true,
+    saved: note.saved || 0,
+    rewriteCharged: note.kind === "cut" && index === (notes || []).findIndex((item) => item?.kind === "cut") ? charged : 0,
+    tailBeyondKept: note.tailBeyondKept || 0,
+    prefix: note.prefix || 0,
+    afterPrefix: note.afterPrefix || 0,
+    tokens: note.tokens || 0,
+    total: note.total || 0,
+    gate: note.gate || "cut",
+  }));
+  if (!lines.length) return charged;
+  try {
+    appendFileSync(join(dir, CUTS_NAME), `${lines.join("\n")}\n`);
+  } catch {}
+  return charged;
+}
+
+function recordDrainStats(dir, { cuts = 0, saved = 0, rewrite = 0 } = {}) {
+  if (!(cuts > 0) || !(saved > 0)) return null;
+  try {
+    const file = join(dir, STATS_NAME);
+    const lock = join(dir, "spine-stats.lock");
+    const tmp = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
+    let fd;
+    try {
+      fd = openSync(lock, "wx");
+    } catch {
+      return null;
+    }
+    try {
+      const prev = readCutStats(dir);
+      const locked = {
+        cuts: prev.cuts + cuts,
+        savedTokens: prev.savedTokens + saved,
+        rewriteTokens: prev.rewriteTokens + rewrite,
+        drains: (Number(prev.drains) || 0) + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      writeFileSync(tmp, JSON.stringify(locked));
+      renameSync(tmp, file);
+      return locked;
+    } finally {
+      try { unlinkSync(tmp); } catch {}
+      closeSync(fd);
+      try { unlinkSync(lock); } catch {}
+    }
+  } catch {
+    return null;
   }
 }
 

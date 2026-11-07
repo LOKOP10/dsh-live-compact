@@ -26,7 +26,7 @@ import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterC
 import {
   discardShadowFiles,
   ensureShadowDir,
-  recordCutStats,
+  flushDrainStats,
   rotateShadow,
   sessionDir,
   shadowFileBody,
@@ -236,13 +236,18 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
   if (nodes.length === 0 || nodes.length !== priced.length) return null;
   const first = session.eventAt(nodes[0])?.type === "system/message" ? 1 : 0;
   let end = priced.length - 1;
+  let floorCard = -1;
+  for (let index = first; index <= end; index += 1) {
+    if (isCheckpoint(session, nodes[index])) floorCard = index;
+  }
   while (end >= first) {
+    if (floorCard >= 0 && end <= floorCard) return null;
     const event = session.eventAt(nodes[end]);
     const shortTail = event?.type === "assistant/message" || (event?.type === "user/message" && priced[end].tokens < 400);
     if (!shortTail) break;
     end -= 1;
   }
-  while (end >= first && isCheckpoint(session, nodes[end])) end -= 1;
+  if (floorCard >= 0 && end <= floorCard) return null;
   while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
   let keptTokens = 0;
   const visible = [];
@@ -261,8 +266,14 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
     const keptEnd = visible[span.end].index;
     for (let index = visible[span.start].index; index <= keptEnd; index += 1) keptTokens += priced[index].tokens;
     end = cutEnd;
-    while (end >= first && (isCheckpoint(session, nodes[end]) || isUser(session, nodes[end]))) end -= 1;
-    while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
+    while (end >= first && isUser(session, nodes[end]) && !(floorCard >= 0 && end - 1 <= floorCard)) end -= 1;
+    if (floorCard >= 0 && end <= floorCard) return null;
+    if (isCheckpoint(session, nodes[end])) return null;
+    while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) {
+      if (floorCard >= 0 && end - 1 <= floorCard) return null;
+      end -= 1;
+    }
+    if (floorCard >= 0 && end <= floorCard) return null;
   }
   if (end < first || isCheckpoint(session, nodes[end])) return null;
   const spanPieces = (spanStart, spanEnd) => {
@@ -380,6 +391,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   sessionState = new Map();
   shadowFullWarned = new Set();
   rawSeen = new Map();
+  callIndex = new Map();
+  captureCursor = new Map();
   pruneGuarded = false;
 
   constructor(ctx, config) {
@@ -392,6 +405,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         await Promise.allSettled(pendingCuts);
       });
       ctx.on("session/event", (session, event) => {
+        this.noteEvent(session, event);
         if (event?.type !== "tool/result") return;
         this.captureOne(session, event);
       });
@@ -399,10 +413,11 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         if (status !== "idle") return;
         const state = this.stateFor(agent);
         if (state.warming) return;
-        const done = agent.session.snapshotEvents().some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
+        const events = agent.session.snapshotEvents();
+        const done = events.some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
         if (!done) return;
         state.warming = true;
-        const job = this.finishTurn(agent).finally(() => {
+        const job = this.finishTurn(agent, events).finally(() => {
           state.warming = false;
           pendingCuts.delete(job);
         });
@@ -456,13 +471,17 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     return planMessages(messages);
   }
 
-  async finishTurn(agent) {
+  async finishTurn(agent, events) {
     const state = this.stateFor(agent);
     const signal = AbortSignal.timeout(30000);
+    const ev = events || agent.session.snapshotEvents();
+    this.captureNew(agent.session, ev);
+    const jobs = collectJobs(ev);
+    const calls = indexToolCalls(ev);
     try {
       await agent.runMaintenance(async (agentSignal) => {
         const op = AbortSignal.any([agentSignal, signal]);
-        const measurement = this.ctx.tokenMeter.measure(agent.session);
+        let measurement = this.ctx.tokenMeter.measure(agent.session);
         if (measurement.totalTokens < MIN_PRESSURE || measurement.totalTokens >= BIG_GATE) return;
         // 官方压缩后的第一次 idle 先让一让，免得紧接着又把它产出的摘要卷走。
         // 主判据是「这条官方卡片处理过没有」（与实际间隔多久无关），时间窗口只作可选兜底。
@@ -474,7 +493,6 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         }
         if (inCooldown(agent.session, { windowMs: COOLDOWN_MS })) return;
         this.ensurePruneGuard();
-        this.captureSession(agent.session);
         const resolved = this.engineFor(agent);
         if (state.engine !== resolved.engine || state.engineSource !== resolved.source) {
           this.ctx.logger?.info?.(`spine engine=${resolved.engine} source=${resolved.source}`);
@@ -490,13 +508,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         state.maxTurnGrowth = Math.max(state.maxTurnGrowth || 0, growth);
         const projected = state.maxTurnGrowth > 0 && last + state.maxTurnGrowth > KEEP_ROUND_TOKENS;
         const drain = cloud && (projected || last >= URGENT_TOKENS);
+        const drainNotes = [];
         for (let pass = 0; pass < 8; pass += 1) {
-          const measured = this.ctx.tokenMeter.measure(agent.session);
+          const measured = measurement;
           if (drain && measured.totalTokens <= KEEP_ROUND_TOKENS) break;
           const chunk = selectNewestChunk(agent.session, measured, state.key, {
             engine: resolved.engine,
-            jobs: collectJobs(agent.session.snapshotEvents()),
-            calls: indexToolCalls(agent.session.snapshotEvents()),
+            jobs,
+            calls,
             rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
             totalTokens: measured.totalTokens,
             drain,
@@ -518,12 +537,23 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             state.localOnly = true;
             state.approvedCard = chunk.card;
             await this.commitSelectedSpan(agent, chunk, op);
-            const after = this.ctx.tokenMeter.measure(agent.session).totalTokens;
+            measurement = this.ctx.tokenMeter.measure(agent.session);
+            const after = measurement.totalTokens;
             reduced = after < before;
             const saved = before - after;
-            const stats = saved > 0 ? recordCutStats(shadowDirectory(), { saved, rewrite: Math.max(0, after - (chunk.prefix || 0)) }) : null;
-            const total = stats ? stats.savedTokens : "unknown";
-            this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved} total=${total}`);
+            if (saved > 0) {
+              drainNotes.push({
+                kind: "cut",
+                saved,
+                afterPrefix: Math.max(0, after - (chunk.prefix || 0)),
+                tailBeyondKept,
+                prefix: chunk.prefix || 0,
+                total: after,
+                tokens: chunk.tokens,
+                gate: "cut",
+              });
+            }
+            this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved}`);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.ctx.logger?.warn?.(`spine cut failed: ${message}`);
@@ -535,7 +565,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           }
           if (!drain) break;
         }
-        state.turnBase = this.ctx.tokenMeter.measure(agent.session).totalTokens;
+        if (drainNotes.length) flushDrainStats(shadowDirectory(), drainNotes, { sid: state.key, drain });
+        state.turnBase = measurement.totalTokens;
         await this.ctx.sessions?.flush?.(agent.session);
         this.rememberPrefix(agent);
       });
@@ -727,10 +758,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const key = session?.id || DEFAULT_KEY;
     const mapKey = this.rawKey(session, id);
     if (this.rawSeen.get(mapKey)?.ok) return this.rawSeen.get(mapKey);
-    let call = null;
-    try {
-      call = indexToolCalls(session.snapshotEvents?.() || []).get(id);
-    } catch {}
+    const call = this.callIndex.get(session?.id || DEFAULT_KEY)?.get(id) || null;
     try {
       const shadow = shadowDirectory();
       ensureShadowDir(shadow, access);
@@ -766,16 +794,45 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     }
   }
 
-  captureSession(session) {
-    const seen = new Set();
-    for (const event of session?.snapshotEvents?.() || []) {
-      if (event?.type !== "tool/result") continue;
-      const id = event.data?.message?.toolCallId;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      this.captureOne(session, event);
+  noteEvent(session, event) {
+    const found = indexToolCalls([event]);
+    if (!found.size) return;
+    const key = session?.id || DEFAULT_KEY;
+    let index = this.callIndex.get(key);
+    if (!index) {
+      index = new Map();
+      this.callIndex.set(key, index);
     }
+    for (const [id, call] of found) {
+      if (!index.has(id)) index.set(id, call);
+    }
+  }
+
+  captureNew(session, events) {
+    const key = session?.id || DEFAULT_KEY;
+    let cursor = this.captureCursor.get(key) ?? 0;
+    if (!Array.isArray(events) || events.length < cursor) cursor = 0;
+    let next = cursor;
+    const seen = new Set();
+    for (const event of events) {
+      const seq = Number.isInteger(event?.seq) ? event.seq : next;
+      if (seq < cursor) continue;
+      this.noteEvent(session, event);
+      if (event?.type === "tool/result") {
+        const id = event.data?.message?.toolCallId;
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          this.captureOne(session, event);
+        }
+      }
+      next = seq + 1;
+    }
+    this.captureCursor.set(key, next);
     return seen;
+  }
+
+  captureSession(session) {
+    return this.captureNew(session, session?.snapshotEvents?.() || []);
   }
 
   surfaceToolIds(session) {

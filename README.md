@@ -19,13 +19,13 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.0.9
+dsh plugin --profile headless add dsh-live-compact@1.1.0
 ```
 
 网页和桌面端（共用 web profile，装一次两边都生效）：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.0.9
+dsh plugin --profile web add dsh-live-compact@1.1.0
 ```
 
 想先装到本机看版本：
@@ -35,21 +35,34 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
+## 1.1.0
+
+1. Issue #19 里下一轮输入回到 21 万到 24 万、前缀被打掉的那一刀，是切点走到了已有卡片左边。1.1.0 把最新一张卡片当成地板。往左走到卡片就停。切点右边还有更新的卡片，这一刀不切。已进缓存的前缀不再被后面的刀改写。
+2. 同一次收尾可以连切，这是现有设计，没有改。改的是记账。以前每一刀都把尾巴算进重写，四刀就把同一段尾巴乘了四次。现在一次收尾只记一次：第一刀之后的前缀，减去后面几刀省下的。`dsh-live-compact stats` 的 `rewrite` 用这个数。逐刀明细在 shadow 目录的 `spine-cuts.jsonl`，只有序号、token 和切点，没有消息原文。
+3. 没有加「省下的必须盖过重写」这种新门槛。加了会把同一次收尾里后面的刀切掉。65 万停切线、收尾停在 3.2 万、`CHUNK_MIN` 默认 1000、云端默认 `0.8` / `65536` / `8192`，都没改。`SPINE_THUNDER` 仍是默认关闭。
+4. 今天桌面端长时间卡住，是每回合、每个工具结果都在拷贝整份会话日志，并反复计量。1.1.0 一个空闲回合只拷贝一次日志。工具结果到达时用已经记下的调用编号，不再为了查一次调用而拷贝整份日志。收尾循环复用这一次的任务和调用表。token 计量是开头一次，每真正切下一刀再测一次。没切的回合只测一次。切哪一段没改。
+
+## 门禁和复测
+
+`npm run test:gate` 已过。Issue #19 的卡片地板、一次收尾重写只记一次、65 万和 `CHUNK_MIN` 1000 不动，以及空闲时不再重扫全日志，都在这道门禁里。连模型的 8 组 31 轮没有重跑。这次不改填日志题的判分，也不改切哪一段。下面四张图是 1.0.9 那次实测，1.1.0 沿用。
+
+云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。本地看题对不对和切掉的 token。DS V4.1 Flash，8 组，184/184，跳过 0，缓存 98.22%，题末最高 35334，切掉 97306，估算费用 $0.208。GLM 5.3 Flash，同一套 8 组，184/184，同一公式缓存 74.66%，切掉 481483。第 6、8 组几乎每轮只读一次全文，规则没有为它改。Coder 390 27B，3 组 31 轮，填日志 69/69，切掉 20635，都在第 30 轮。墙钟 29 分、20 分、86 分。费用是离峰用量估算，不是账单。
+
+![汇总分题](docs/slide-110-by-question.jpg)
+
+![DS V4.1 Flash](docs/slide-110-ds.jpg)
+
+![GLM 5.3 Flash](docs/slide-110-glm.jpg)
+
+![Coder 390 27B](docs/slide-110-390.jpg)
+
 ## 1.0.9
 
 1. 云端和本地按当前配置里这一家的地址区分。请求头通常只有 provider 名。配置里的 `baseURL` 优先，没有再看官方 DeepSeek 和内置目录。公网地址按云端切，回环和内网按本地。读不到地址仍按本地。`SPINE_ENGINE=local` 或 `cloud` 可以强制指定。这不改官方大门的 headroom。
 2. 官方大压缩的三项可以在启动前用环境变量覆盖：`SPINE_THRESHOLD_RATIO`、`SPINE_HEADROOM_TOKENS`、`SPINE_RETAIN_TOKENS`。云端默认仍是 `0.8`、`65536`、`8192`，不按地址改小。TUI 的 `/settings` 没有这一项。要改当前配置，直接改 `cordis.patch.yml` 里的对应字段。
 3. 发版门禁是 `npm run test:gate`，不连模型。8 组 31 轮在 `test/live-fill`，要连模型。这两部分都在 GitHub 测试集里。
 4. 测评分两个口径。云端看题对不对，以及每轮第一个 `step_end` 的缓存命中。本地看题对不对和切掉的 token。DS V4.1 Flash，8 组，184/184，跳过 0，缓存 98.22%，题末最高 35334，切掉 97306，估算费用 $0.208。GLM 5.3 Flash，同一套 8 组，184/184，同一公式缓存 74.66%。Coder 390 27B，3 组 31 轮，填日志 69/69，切掉 20635。费用是离峰用量估算，不是账单。
-5. 安装用 npm 的 `dsh-live-compact@1.0.9`。上不了 npm 时用镜像包 https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz 。页面在 https://download.merkyorlynn.com/live-compact.html 。
-
-![汇总分题](docs/slide-109-by-question.jpg)
-
-![DS V4.1 Flash](docs/slide-109-ds.jpg)
-
-![GLM 5.3 Flash](docs/slide-109-glm.jpg)
-
-![Coder 390 27B](docs/slide-109-390.jpg)
+5. 安装用 npm 的 `dsh-live-compact@1.0.9`。上不了 npm 时用镜像包 https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz 。页面在 https://download.merkyorlynn.com/live-compact.html 。测评图在当时的 [v1.0.9](https://github.com/Tranquillitatis-Lab/dsh-live-compact/releases/tag/v1.0.9)。
 
 ![边做边压](docs/slide-cover.jpg)
 
@@ -246,8 +259,8 @@ dsh-live-compact --version
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.0.9
-dsh plugin --profile web add dsh-live-compact@1.0.9
+dsh plugin --profile headless add dsh-live-compact@1.1.0
+dsh plugin --profile web add dsh-live-compact@1.1.0
 ```
 
 想先装到本机看版本：
@@ -257,12 +270,12 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.8 的旧链接仍在。
+备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.9 的旧链接仍在。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.0.9.tgz"
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz"
 dsh-live-compact --version
 ```
 
@@ -271,6 +284,8 @@ dsh-live-compact --version
 DSH-TUI 同样换不掉预设里的原版压缩，先不要装。
 
 被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。上限 256MB。快满时删最老的备份。卡片里的序号是会话日志的事件号。要在当前会话的备份里找一行，用 `import { searchShadow } from "dsh-live-compact/shadow-search"`。
+
+`dsh-live-compact stats` 的 `saved` 是切完当下少掉的 token，`rewrite` 是同一次收尾实际要重写的尾巴，只记一次。同一步连切不会按刀数把尾巴乘上去。这两个数口径不同，比值不是盈亏。桌面端没有终端，`rg "spine cut"` 只在终端输出里找得到。逐刀明细在 shadow 目录的 `spine-cuts.jsonl`。
 
 改上限：
 

@@ -746,13 +746,24 @@ function spanTokens(items, start, end) {
 function walkOffTail(items, end) {
   while (end >= 0) {
     const item = items[end];
+    // 卡片是停止线。走到它就没有可切的尾巴，不能再往左切进已缓存的前缀。
+    // A checkpoint is the floor. Reaching it means the tail has nothing left to cut.
+    if (item.checkpoint) return -1;
     const shortUser = item.type === "user" && (item.tokens || 0) < 400;
-    if (item.type !== "assistant" && !shortUser && !item.checkpoint) break;
+    if (item.type !== "assistant" && !shortUser) break;
     end -= 1;
   }
   while (end >= 0 && items[end].type === "user") end -= 1;
-  while (end >= 0 && items[end].checkpoint) end -= 1;
+  if (end >= 0 && items[end].checkpoint) return -1;
   return end;
+}
+
+export function cutCrossesNewerCheckpoint(items, end) {
+  if (!Array.isArray(items) || !Number.isInteger(end)) return false;
+  for (let index = end + 1; index < items.length; index += 1) {
+    if (items[index]?.checkpoint) return true;
+  }
+  return false;
 }
 
 function retreatBefore(items, end, boundary) {
@@ -805,6 +816,9 @@ export function selectCutIndexes(items, {
   const floor = firstUser >= 0 ? firstUser + 1 : 0;
   const end = walkOffTail(items, limit);
   if (end < 0) return null;
+  // 切点右边还有卡片，说明这一刀在已缓存前缀里。不切。
+  // A checkpoint to the right means this span is inside the cached prefix. Do not cut.
+  if (cutCrossesNewerCheckpoint(items, end)) return null;
   if (!cloud) {
     if (lastUser >= 0 && end <= lastUser) return null;
     if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
