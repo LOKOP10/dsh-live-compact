@@ -170,6 +170,106 @@ test("temp cleanup cannot transfer ownership to a replacement lock or cause its 
   assert.equal(readFileSync(lock, "utf8"), replacement);
 });
 
+for (const optIn of [false, true]) {
+  test(`one post-publication verification EIO releases only its owned lock (opt-in ${optIn})`, (t) => {
+    const f = fixture(t);
+    configure(t, f, optIn);
+    const lock = join(f.dir, LOCK);
+    const failure = Object.assign(new Error("injected verification read failure"), { code: "EIO" });
+    let pending = false;
+    let failed = false;
+    withFsMock(t, "linkSync", (link) => (source, target) => {
+      link(source, target);
+      if (target === lock && !failed) pending = true;
+    }, () => withFsMock(t, "readSync", (read) => (...args) => {
+      if (pending) {
+        pending = false;
+        failed = true;
+        throw failure;
+      }
+      return read(...args);
+    }, () => {
+      assert.throws(() => withShadowRoot(f.dir, () => assert.fail("failed validation admitted")),
+        (error) => error.code === "ESHADOWBUSY" && error.cause === failure);
+      assert.equal(failed, true);
+      assert.equal(existsSync(lock), false, "failed acquisition leaked its live-PID lock");
+      assert.equal(rotation(f).ok, true);
+      assert.equal(statSync(backup(f, 120).file).size, 120);
+      assert.equal(rotation(f).used, 120);
+    }));
+  });
+
+  test(`one final-release verification EIO releases only its owned lock (opt-in ${optIn})`, (t) => {
+    const f = fixture(t);
+    configure(t, f, optIn);
+    const failure = Object.assign(new Error("injected release verification failure"), { code: "EIO" });
+    let pending = false;
+    withFsMock(t, "readSync", (read) => (...args) => {
+      if (pending) {
+        pending = false;
+        throw failure;
+      }
+      return read(...args);
+    }, () => {
+      assert.throws(() => withShadowRoot(f.dir, () => { pending = true; }),
+        (error) => error.code === "ESHADOWBUSY" && error.cause === failure);
+      assert.equal(existsSync(join(f.dir, LOCK)), false, "failed release leaked its live-PID lock");
+      assert.equal(rotation(f).ok, true);
+      assert.equal(statSync(backup(f, 120).file).size, 120);
+    });
+  });
+}
+
+for (const stage of ["acquisition", "release"]) for (const change of ["inode", "record", "malformed", "unreadable", "root"]) {
+  test(`failed ${stage} preserves a ${change} replacement or unverifiable guard`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    const lock = join(f.dir, LOCK);
+    const old = join(f.base, "original");
+    const failure = Object.assign(new Error("injected verification read failure"), { code: "EIO" });
+    let pending = false;
+    let failed = false;
+    let expected;
+    let expectedInode;
+    withFsMock(t, "linkSync", (link) => (source, target) => {
+      link(source, target);
+      if (target === lock && stage === "acquisition") pending = true;
+    }, () => withFsMock(t, "readSync", (read) => (...args) => {
+      if (pending) {
+        pending = false;
+        failed = true;
+        expected = readFileSync(lock, "utf8");
+        if (change === "inode") {
+          renameSync(lock, old);
+          writeFileSync(lock, expected); // Same bytes/PID/token, different object.
+        } else if (change === "record" || change === "malformed") {
+          expected = change === "record" ? holder(process.pid, "b".repeat(48)) : "unverifiable";
+          writeFileSync(lock, expected); // Same inode, different record.
+        } else if (change === "root") {
+          renameSync(f.dir, old);
+          mkdirSync(f.dir);
+          fs.linkSync(join(old, LOCK), lock); // Even the exact record cannot waive root identity.
+        }
+        expectedInode = statSync(lock).ino;
+        throw failure;
+      }
+      if (failed && change === "unreadable") throw failure;
+      return read(...args);
+    }, () => {
+      assert.throws(() => withShadowRoot(f.dir, () => {
+        if (stage === "acquisition") assert.fail("failed validation admitted");
+        pending = true;
+      }),
+        (error) => error.code === "ESHADOWBUSY" && error.cause === failure);
+    }));
+    assert.equal(failed, true);
+    assert.equal(readFileSync(lock, "utf8"), expected);
+    assert.equal(statSync(lock).ino, expectedInode);
+    if (change === "root") assert.equal(existsSync(join(old, LOCK)), true);
+    assert.throws(() => rotation(f), (error) => error.code === "ESHADOWBUSY");
+  });
+}
+
 for (const [kind, code] of [["default", "ENOTSUP"], ["shared", "EOPNOTSUPP"], ["dedicated", "ENOSYS"]]) {
   test(`${kind} root with link ${code} uses durable shared full scans and real raw/cut/official writes`, (t) => {
     const f = fixture(t);
