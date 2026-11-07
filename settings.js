@@ -1,9 +1,4 @@
-/**
- * 设置系统。schema、纯配置读取与运行期现值；客户端控件交给宿主官方表单。
- * 这个文件不 import 任何上游包：schema 构造器由 adapter 传进来，取值解析是纯函数，
- * 所以别的插件可以整份拿走用，只改 DEFAULTS 和 ENV 两张表。
- * Settings live in the host's own schema-driven settings page. No upstream imports here.
- */
+/** 设置系统 */
 
 /** 用户可调项。默认值与 1.1.1 的行为完全一致：不配置就一切照旧。 */
 export const DEFAULTS = Object.freeze({

@@ -1,13 +1,7 @@
 window.__ModuleLoader__.load({
   id: "dsh-live-compact",
   factory(require) {
-    /**
-     * 设置界面。全走宿主原生接口：configForms 拿配置作用域，官方 SettingsFormModel 管草稿与写回，
-     * 官方 settingsNumberField 声明字段，官方插件页槽位挂载，官方 ctx.locale 出词典。
-     * 入口是宿主的 __ModuleLoader__ 产物，因此没有 JSX、没有构建步骤。
-     * 表 GROUPS 是唯一的业务：常用与高级设置两栏。
-     * Native configForms + SettingsFormModel + settingsNumberField; no JSX, no build step.
-     */
+    /** 全走宿主原生接口的设置界面。 */
     const React = require("react");
     const { SettingsFormModel, settingsNumberField, SettingsForm, SettingsValueField, Switch } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
