@@ -775,14 +775,17 @@ check("p0-15 README drops obsolete backup limits", () => {
   assert.equal(/\b(64|128)\s*Mi?B\b/i.test(readme), false);
 });
 
-check("p0-16 only adapter.js imports a DSH package", () => {
-  const adapter = join(packageRoot, "adapter.js");
+// 服务端只认 adapter.js；客户端 bundle 在宿主模块图里跑，只能自己 require 一次官方 primitives。
+check("p0-16 only the adapter and the client bundle import a DSH package", () => {
+  const allowed = new Set([join(packageRoot, "adapter.js"), join(packageRoot, "client.js")]);
   const files = packageJavaScriptFiles(packageRoot);
-  assert.ok(files.includes(adapter), adapter);
+  assert.ok(files.includes(join(packageRoot, "adapter.js")));
   for (const file of files) {
     const imports = /(?:from\s*|import\(\s*|require\(\s*)["']@deepseek-ai\//.test(readFileSync(file, "utf8"));
-    assert.equal(imports, file === adapter, file);
+    assert.equal(imports, allowed.has(file), file);
   }
+  const client = readFileSync(join(packageRoot, "client.js"), "utf8");
+  assert.equal((client.match(/["']@deepseek-ai\//g) ?? []).length, 1, "client names exactly one DSH package");
 });
 
 check("p0-16 package ships adapter.js", () => {
@@ -812,7 +815,9 @@ check("p0-18 settings UI ships through native client slots", () => {
   assert.match(source, /require\("react"\)/);
   assert.match(source, /plugins\.row\.config/);
   assert.match(source, /locale\.register/);
-  assert.match(source, /form\.mutate/);
+  assert.match(source, /SettingsFormModel/);
+  assert.match(source, /settingsNumberField/);
+  assert.match(source, /configForms/);
   assert.equal(/^\s*(?:import|export)\s/m.test(source), false);
   assert.equal(/from\s*["']@deepseek-ai\//.test(source), false);
 });

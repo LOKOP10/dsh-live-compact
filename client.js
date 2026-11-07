@@ -2,29 +2,42 @@ window.__ModuleLoader__.load({
   id: "dsh-live-compact",
   factory(require) {
     /**
-     * 设置界面。只用宿主自己的东西：客户端槽位、官方 form.mutate 写配置、官方 locale 词典、
-     * require("react")。宿主加载的就是这个 __ModuleLoader__ 产物，所以不需要构建步骤。
-     * 表 FIELDS 是这里唯一的业务：分「常用」和「高级设置」两栏。别的插件拿走本文件改表即可复用。
-     * Native slots, native config writes, native dictionary; no JSX and no build step.
+     * 设置界面。全走宿主原生接口：configForms 拿配置作用域，官方 SettingsFormModel 管草稿与写回，
+     * 官方 settingsNumberField 声明字段，官方插件页槽位挂载，官方 ctx.locale 出词典。
+     * 入口是宿主的 __ModuleLoader__ 产物，因此没有 JSX、没有构建步骤。
+     * 表 GROUPS 是唯一的业务：常用与高级设置两栏。
+     * Native configForms + SettingsFormModel + settingsNumberField; no JSX, no build step.
      */
     const React = require("react");
+    const { SettingsFormModel, settingsNumberField } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
 
-    const FIELDS = [
-      { key: "minTokens", section: "basic", label: "起切 token 数", hint: "默认 20000" },
-      { key: "pointerTokens", section: "basic", label: "大结果只留指针", hint: "0 = 跟随一刀上限" },
-      { key: "keepRounds", section: "basic", label: "保留原文轮数", hint: "默认 3" },
-      { key: "auto", section: "basic", label: "自动压缩", kind: "bool" },
-      { key: "chunkMin", section: "advanced", label: "一刀最小 token", hint: "默认 1000" },
-      { key: "chunkMax", section: "advanced", label: "一刀最大 token", hint: "默认 32000" },
-      { key: "keepRoundTokens", section: "advanced", label: "收尾停止线", hint: "默认 32000" },
-      { key: "bigGate", section: "advanced", label: "绝对停切线", hint: "默认 650000" },
-      { key: "cooldownMs", section: "advanced", label: "官方压缩后冷却 ms", hint: "0 = 只跳过一次" },
-      { key: "thresholdRatio", section: "advanced", label: "官方大压缩触发比例", hint: "默认 0.8" },
-      { key: "headroomTokens", section: "advanced", label: "官方大压缩预留 token", hint: "默认 65536" },
-      { key: "retainTokens", section: "advanced", label: "官方大压缩保留 token", hint: "默认 8192" },
-      { key: "compactionRetries", section: "advanced", label: "官方大压缩重试次数", hint: "默认 0" },
+    const NS = "compaction-spine";
+    const GROUPS = [
+      { id: "basic", keys: ["minTokens", "pointerTokens", "keepRounds"] },
+      {
+        id: "advanced",
+        keys: [
+          "chunkMin", "chunkMax", "keepRoundTokens", "bigGate", "cooldownMs",
+          "thresholdRatio", "headroomTokens", "retainTokens", "compactionRetries",
+        ],
+      },
     ];
+    const KEYS = GROUPS.flatMap((group) => group.keys);
+    const LABELS = {
+      minTokens: ["起切 token 数", "默认 20000"],
+      pointerTokens: ["大结果只留指针", "0 = 跟随一刀上限"],
+      keepRounds: ["保留原文轮数", "默认 3"],
+      chunkMin: ["一刀最小 token", "默认 1000"],
+      chunkMax: ["一刀最大 token", "默认 32000"],
+      keepRoundTokens: ["收尾停止线", "默认 32000"],
+      bigGate: ["绝对停切线", "默认 650000"],
+      cooldownMs: ["官方压缩后冷却 ms", "0 = 只跳过一次"],
+      thresholdRatio: ["官方大压缩触发比例", "默认 0.8"],
+      headroomTokens: ["官方大压缩预留", "默认 65536"],
+      retainTokens: ["官方大压缩保留", "默认 8192"],
+      compactionRetries: ["官方大压缩重试", "默认 0"],
+    };
 
     const zh = {
       summary: "20000 起切、3 轮留原文、650000 停",
@@ -32,133 +45,97 @@ window.__ModuleLoader__.load({
       advanced: "高级设置",
       save: "保存",
       saving: "保存中…",
-      reset: "还原",
-      saved: "已保存",
-      rejected: "配置已被别处改动，请刷新后再改",
-      loading: "读取中…",
+      discard: "放弃修改",
+      invalid: "有值不合法",
       unavailable: "当前配置不可写",
+      unavailableHost: "宿主没有提供这一项配置",
     };
-
     const en = {
       summary: "cuts at 20000, keeps 3 rounds, stops at 650000",
       basic: "Common",
       advanced: "Advanced",
       save: "Save",
       saving: "Saving…",
-      reset: "Reset",
-      saved: "Saved",
-      rejected: "Configuration changed elsewhere; reload and retry",
-      loading: "Loading…",
+      discard: "Discard",
+      invalid: "A value is invalid",
       unavailable: "Configuration is not writable",
+      unavailableHost: "The host does not serve this namespace",
     };
-
-    const valueOf = (values, field) =>
-      field.kind === "bool" ? values[field.key] === true : Number(values[field.key] ?? 0);
 
     const rowStyle = { display: "flex", gap: "0.75rem", alignItems: "center", margin: "0.35rem 0" };
 
-    function Field(props) {
-      const { values, field, t, edit } = props;
-      const input = field.kind === "bool"
-        ? h("input", {
-          type: "checkbox",
-          checked: valueOf(values, field),
-          onChange: (event) => edit(field.key, event.target.checked),
-        })
-        : h("input", {
-          type: "number",
-          value: valueOf(values, field),
-          onChange: (event) => edit(field.key, Number(event.target.value)),
-        });
-      return h("label", { style: rowStyle },
-        h("span", { style: { flex: "0 0 12rem" } }, t(field.label)),
-        input,
-        field.hint ? h("span", { style: { opacity: 0.6, fontSize: "0.85em" } }, t(field.hint)) : null);
-    }
+    function createUi(ctx, t) {
+      const model = new SettingsFormModel(
+        ctx.configForms.get(NS),
+        KEYS.map((key) => settingsNumberField(key)),
+      );
+      const read = () => ({
+        shell: model.shell(),
+        fields: Object.fromEntries(KEYS.map((key) => [key, model.field(key)])),
+      });
+      const store = model.bind(read);
 
-    // 宿主给的是 { state, mutate }，但 state 在数据没到时可能是 undefined 或一个取值函数，两种都认。
-    function snapshotOf(form) {
-      const state = form && form.state;
-      return typeof state === "function" ? state() : state;
-    }
-
-    function SettingsForm(props) {
-      const { form, t } = props;
-      const state = snapshotOf(form);
-      const [draft, setDraft] = React.useState(() => (state && state.value) || {});
-      const [busy, setBusy] = React.useState(false);
-      const [message, setMessage] = React.useState("");
-
-      const current = snapshotOf(form);
-      React.useEffect(() => {
-        if (!busy) setDraft((current && current.value) || {});
-      }, [current && current.revision, current && current.status]);
-
-      if (!state) {
-        // 数据没到时把宿主实际给了什么显示出来，方便定位，不静默转圈。
-        const keys = Object.keys(props || {}).join(",");
-        const shape = form === undefined ? "form=undefined" : `form=${typeof form},state=${typeof (form && form.state)}`;
-        return h("p", { role: "status" }, `${t("loading")} [${shape}; view=${props.view}; keys=${keys}]`);
+      function Field(props) {
+        const { name, field, disabled } = props;
+        const [label, hint] = LABELS[name] || [name, ""];
+        return h("label", { style: rowStyle },
+          h("span", { style: { flex: "0 0 12rem" } }, t(label) === label ? label : t(label)),
+          h("input", {
+            type: "number",
+            value: field && field.text !== undefined ? field.text : "",
+            disabled: disabled || !(field && field.writable),
+            onChange: (event) => model.actions().edit(field, event.target.value),
+          }),
+          h("span", { style: { opacity: 0.6, fontSize: "0.85em" } }, hint),
+          field && field.error ? h("span", { style: { color: "var(--dsw-alias-state-error-primary)" } }, String(field.error)) : null);
       }
 
-      const ready = state.status === "ready" && state.writable && state.mode === "host";
-      const edit = (key, value) => {
-        setDraft({ ...draft, [key]: value });
-        setMessage("");
-      };
-      const save = async () => {
-        if (!ready || busy) return;
-        const ops = FIELDS
-          .filter((field) => draft[field.key] !== undefined && draft[field.key] !== state.value[field.key])
-          .map((field) => ({ op: "set", path: [field.key], value: draft[field.key] }));
-        if (!ops.length) { setMessage(""); return; }
-        setBusy(true);
-        try {
-          setMessage(t((await form.mutate(ops, state.revision)) ? "saved" : "rejected"));
-        } finally {
-          setBusy(false);
-        }
-      };
-
-      const section = (name) => FIELDS
-        .filter((field) => field.section === name)
-        .map((field) => h(Field, { key: field.key, values: draft, field, t, edit }));
-
-      return h("form", {
-        onSubmit: (event) => {
-          event.preventDefault();
-          void save();
-        },
-      },
-      h("h4", { style: { margin: "0 0 0.5rem" } }, t("basic")),
-      section("basic"),
-      h("details", { style: { marginTop: "0.75rem" } },
-        h("summary", { style: { cursor: "pointer" } }, t("advanced")),
-        section("advanced")),
-      h("div", { style: { display: "flex", gap: "0.5rem", marginTop: "0.75rem" } },
-        h("button", { type: "submit", disabled: !ready || busy }, t(busy ? "saving" : "save")),
-        h("button", {
-          type: "button",
-          disabled: busy,
-          onClick: () => {
-            setDraft((snapshotOf(form) || {}).value || {});
-            setMessage("");
+      function SettingsForm() {
+        const [snapshot, setSnapshot] = React.useState(read);
+        React.useEffect(() => {
+          const unsubscribe = store.subscribe(() => setSnapshot(read()));
+          return typeof unsubscribe === "function" ? unsubscribe : undefined;
+        }, []);
+        const { shell, fields } = snapshot;
+        if (!shell.available) return h("p", { role: "status" }, t("unavailableHost"));
+        const section = (group) => group.keys.map((name) =>
+          h(Field, { key: name, name, field: fields[name], disabled: !shell.writable }));
+        return h("form", {
+          onSubmit: (event) => {
+            event.preventDefault();
+            void model.save();
           },
-        }, t("reset"))),
-      ready ? null : h("p", { role: "status" }, t("unavailable")),
-      message ? h("p", { role: "status" }, message) : null);
+        },
+        h("h4", { style: { margin: "0 0 0.5rem" } }, t("basic")),
+        section(GROUPS[0]),
+        h("details", { style: { marginTop: "0.75rem" } },
+          h("summary", { style: { cursor: "pointer" } }, t("advanced")),
+          section(GROUPS[1])),
+        h("div", { style: { display: "flex", gap: "0.5rem", marginTop: "0.75rem" } },
+          h("button", { type: "submit", disabled: !shell.writable || shell.saving || shell.invalid },
+            t(shell.saving ? "saving" : "save")),
+          h("button", {
+            type: "button",
+            disabled: shell.saving || !shell.dirty,
+            onClick: () => model.actions().discard(),
+          }, t("discard"))),
+        shell.invalid ? h("p", { role: "status" }, t("invalid")) : null,
+        !shell.writable ? h("p", { role: "status" }, t("unavailable")) : null);
+      }
+
+      return { model, SettingsForm };
     }
 
     return {
-      inject: ["slots", "locale"],
+      inject: ["slots", "locale", "configForms"],
       apply(ctx) {
+        const t = ctx.locale.bind("liveCompact");
         ctx.effect(() => ctx.locale.register("liveCompact", { zh, en }), "live-compact: settings dictionary");
-        ctx.slots.inject("plugins.row.config", function* () {
-          yield ctx.slots.register(
-            { name: "plugins.row.config", key: "dsh-live-compact#compaction-spine", locale: "liveCompact" },
-            (props) => (props.view === "summary" ? h("span", null, props.t("summary")) : h(SettingsForm, props)),
-          );
-        });
+        const { SettingsForm } = createUi(ctx, t);
+        ctx.effect(() => ctx.slots.inject("plugins.row.config", () => ctx.slots.register(
+          { name: "plugins.row.config", key: "dsh-live-compact#compaction-spine", locale: "liveCompact" },
+          (props) => (props.view === "summary" ? h("span", null, props.t("summary")) : h(SettingsForm)),
+        )), "live-compact: settings page");
       },
     };
   },
