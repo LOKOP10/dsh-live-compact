@@ -400,6 +400,29 @@ class FullCellTests(unittest.TestCase):
         with self.changed(path,data),self.changed(meta_path,json.dumps(meta).encode()):
             self.assertFalse(score_cell(self.root)['gate_pass'])
 
+    def test_model_validation_error_is_quality_and_preserves_cell_accounting(self):
+        path = self.root/'runs/spine-1/t2.jsonl'
+        items = [json.loads(x) for x in path.read_text().splitlines()]
+        target = str(self.root/'work/spine-1/conf/settings.local.toml')
+        items[3:3] = [dict(type='tool_call', callId='validation', tool='edit',
+                          input={'file_path':target, 'old_string':'port = 8642', 'new_string':'port = 9310'}),
+                      dict(type='tool_result', callId='validation', status='error',
+                           result=f'Error: cannot modify "{target}": file has not been read — read the file, then retry')]
+        data = ''.join(json.dumps(x)+'\n' for x in items).encode()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self.changed(path, data))
+            for suffix in ('.meta.json', '.process.json'):
+                target_meta = path.with_suffix(suffix)
+                meta = read_json(target_meta);meta['stdout_sha256'] = sha(data)
+                stack.enter_context(self.changed(target_meta, json.dumps(meta).encode()))
+            report = score_cell(self.root)
+            self.assertTrue(report['evidence_pass'])
+            self.assertEqual((report['complete_turns'], report['planned_turns']), (310, 310))
+            self.assertEqual((report['expected_reads'], report['warn_correct'], report['notice_correct']), (230, 230, 230))
+            self.assertEqual((report['model_tool_errors'], report['fill_correct']), (1, 229))
+            self.assertEqual(report['all_steps']['steps'], 540)
+            self.assertFalse(report['gate_pass'])
+
     def test_stale_group_marker_rejected(self):
         with self.changed(self.root/'runs/spine-1/DONE',b'DONE\n'):
             self.assertFalse(score_cell(self.root)['gate_pass'])

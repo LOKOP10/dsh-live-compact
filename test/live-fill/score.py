@@ -7,7 +7,7 @@ from pathlib import Path
 from contract import (MANIFEST, GROUPS, ROUNDS, FILL, fingerprints, read_json, sha,
                       validate_contract, write_json)
 from mkfx import build_log, expected_inventory
-from rubric import behavior, check_command, fields, fill_answer
+from rubric import behavior, check_command, check_evidence, fields, fill_answer
 
 MAX_LOG_BYTES = 16 * 1024 * 1024
 TRANSPORT = re.compile(r'ECONN\w*|ETIMEDOUT|ENOTFOUND|connection (?:failed|reset|refused)|'
@@ -50,6 +50,18 @@ def grep_proof(args, body, expected, cwd, fixture_lines, truncated=False):
             and proof.startswith(body))
 
 
+def model_validation_error(call, result, cwd):
+    """Only the observed rc.2 edit/write read-before-write rejection."""
+    schema = {'edit': {'file_path', 'old_string', 'new_string'},
+              'write': {'file_path', 'content'}}
+    args = call['input']
+    if (call['tool'] not in schema or set(args) != schema[call['tool']] or
+            any(not isinstance(v, str) for v in args.values()) or result.get('truncated')):
+        return False
+    message = re.fullmatch(r'Error: cannot modify "([^"\n]+)": file has not been read — read the file, then retry', result['result'])
+    return bool(message and same_path(message[1], args['file_path'], cwd))
+
+
 def parse_turn(path, turn, cwd, expected_sid=None):
     """Validate the actual rc.2 JSON projection. Optional buckets stay unknown."""
     bad, quality, calls, usages, pairs = [], [], [], [], {}
@@ -60,7 +72,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
     first_step_seen = False
     first_step_usage = None
     last_step_usage = None
-    projection_truncations = 0
+    projection_truncations = model_tool_errors = 0
     raw = path.read_bytes()
     if len(raw) > MAX_LOG_BYTES or not raw.endswith(b'\n'):
         raise ValueError('oversize or unterminated JSON stream')
@@ -151,12 +163,17 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 raise ValueError('invalid tool result')
             pair[1] = ev
             if pair[0]['tool'] == 'bash':
-                exits = [int(x) for x in re.findall(r'\[(?:exit code: |Command finished with exit code |shell exited: code )(\d+)\]', ev['result'])]
-                expected_failure = turn == 1 and check_command(pair[0]['input'].get('command', '')) and exits == [3]
+                exits = [int(x) for x in re.findall(r'\[(?:exit code: |Command finished with exit code |shell exited: code )(-?\d+)\]', ev['result'])]
+                expected_failure = (turn == 1 and same_path(pair[0]['input'].get('workdir', str(cwd)), cwd, cwd)
+                                    and check_evidence(pair[0]['input'].get('command', ''), ev['result']))
                 if any(exits) and not expected_failure:
                     bad.append('tool command failed')
             if ev['status'] == 'error':
-                bad.append('tool infrastructure failure')
+                if model_validation_error(pair[0], ev, cwd):
+                    model_tool_errors += 1
+                    quality.append('model tool validation error: file not read')
+                else:
+                    bad.append('tool infrastructure failure')
             if re.search(r'\[(?:timed out|killed by signal|stopped:|sandbox:)|Command timed out|shell killed', ev['result'], re.I):
                 bad.append('tool timed out/stopped/denied')
         elif kind == 'final':
@@ -211,13 +228,18 @@ def parse_turn(path, turn, cwd, expected_sid=None):
             bad.append('no successful correlated read of expected file')
         quality += fill_answer(final or '', turn)
     if turn == 1:
-        check_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash' and check_command(c['input'].get('command', ''))]
+        check_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash'
+                       and same_path(c['input'].get('workdir', str(cwd)), cwd, cwd)
+                       and check_command(c['input'].get('command', ''))]
         if len(check_pairs) != 1 or check_pairs[0][1] is None:
             bad.append('missing once-only check execution')
         else:
             body = check_pairs[0][1]['result']
-            if 'E1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)' not in body or '[exit code: 3]' not in body:
+            if (check_pairs[0][1]['status'] != 'completed' or
+                    not check_evidence(check_pairs[0][0]['input'].get('command', ''), body)):
                 bad.append('missing original check failure evidence')
+        if len(check_pairs) > 1:
+            quality.append('repeated check.sh execution')
         if 'E1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)' not in (final or ''):
             quality.append('turn 1 did not report exact check failure')
     if turn == 28:
@@ -228,6 +250,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 warn_correct=turn in FILL and not any('WARN' in x or 'ambiguous' in x for x in quality),
                 notice_correct=turn in FILL and not any('NOTICE' in x or 'ambiguous' in x for x in quality),
                 projection_truncations=projection_truncations,
+                model_tool_errors=model_tool_errors,
                 request_finish_reason=None, transport_retries=None)
 
 
@@ -285,7 +308,7 @@ def score_cell(root):
     report = dict(version=MANIFEST['version'], arm=spec['arm'], spec=spec,
                   planned_turns=GROUPS * ROUNDS, planned_fill=MANIFEST['fill_per_cell'],
                   complete_turns=0, fill_correct=0, expected_reads=0,
-                  fill_complete=0, warn_correct=0, notice_correct=0, projection_truncations=0,
+                  fill_complete=0, warn_correct=0, notice_correct=0, projection_truncations=0, model_tool_errors=0,
                   evidence_errors=[], quality_errors=[], groups=[], fingerprints=run['fingerprints'],
                   observability={'request_finish_reason':'not emitted by rc.2 JSON',
                                  'transport_retries':'not emitted; stderr diagnostics detected, silent retries unknown',
@@ -347,6 +370,7 @@ def score_cell(root):
                     report['notice_correct'] += int(result['notice_correct'] and not result['evidence_errors'])
                     report['fill_correct'] += int(not result['quality_errors'] and not result['evidence_errors'])
                 report['projection_truncations'] += result['projection_truncations']
+                report['model_tool_errors'] += result['model_tool_errors']
                 if result['first_step_usage'] is not None:
                     first.append(result['first_step_usage'])
                 if result['usage']:

@@ -191,6 +191,7 @@ def run_group(root, rid, executable='dsh', timeout=None):
             meta['usage_steps'] = result['usage']
             meta['tool_call_count'] = len(result['calls'])
             meta['projection_truncations'] = result['projection_truncations']
+            meta['model_tool_errors'] = result['model_tool_errors']
             errors += result['evidence_errors']
             quality += result['quality_errors'] + behavior(turn, result['calls'], snap, initial)
             sid = result['session_id']

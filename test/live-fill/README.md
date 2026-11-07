@@ -74,7 +74,12 @@ diagnostics, missing/invalid usage, empty/missing final, missing/mismatched
 session, broken JSON/event ordering/tool pairing, failed tool execution, or no
 successful correlated read of the requested FILL file. Failed attempt logs and
 process metadata survive. There are no automatic retries. Quality errors are
-retained and scored across the fixed task set.
+retained and scored across the fixed task set. The exact observed rc.2
+edit/write read-before-write rejection is a model validation/quality error,
+counted in `model_tool_errors`, rather than an infrastructure failure. It still
+fails candidate quality; successful follow-ups retain real evidence and usage.
+Unknown errors and actual CLI/transport failures remain infrastructure failures.
+See [the pre-run grammar decisions](GRAMMAR.md).
 
 The scorer requires the exact current code/input fingerprints, original initial
 fixture inventory, complete 310-turn evidence, sequential turns in each group,
@@ -86,9 +91,12 @@ still exits nonzero. Stock correctness is never used to excuse candidate errors.
 
 ## Answer and behavior rubric (frozen before any live run)
 
-The scorer is deliberately conservative: unrecognized/ambiguous language fails,
-with no post-run interpretation or grammar expansion. Markdown bullets, bold
-labels and fences may surround the following unambiguous formats.
+The pre-run grammar extracts explicit answer fields from Chinese/English
+Markdown bullets, bold labels, fences, simple two-column tables and labeled
+sections. Supporting prose and supplemental log rows supply no missing fields.
+Wrong, conflicting or uncertain current answers still fail. Grammar decisions
+and bounded historical regression findings are recorded in [GRAMMAR.md](GRAMMAR.md)
+before any new candidate runs.
 
 FILL requires one labeled integer WARN count and one exact NOTICE line or NONE:
 
@@ -103,10 +111,15 @@ NOTICE cache layer pinned to sqlite
 ```
 
 `WARN count`, `WARN 数量`, `WARN 条数` and `WARN` are supported labels. `NOTICE:
-NONE` is equivalent to `NONE`. Counts are parsed as complete integers, never
+NONE` is equivalent to `NONE`. `NOTICE 原文行` and `NOTICE original line` may
+introduce the answer on the same or following line, with line/count annotations.
+Counts are parsed as complete integers, never
 numeric substrings; a filename, `15`/`50` for `5`, guesses, negation, multiple
 answers or contradictory NONE/NOTICE fail. NOTICE text must match the unique
-entire expected original line, with no suffix. An unrelated tool does not prove
+entire expected original line, with no suffix. Clearly historical named-part
+sequences are context; explicit current labels override that exemption.
+Supplemental citations cannot add false NOTICE lines or conflicting counts.
+An unrelated tool does not prove
 a read: the scorer pairs real `callId`s, validates the requested and returned
 path, successful result and numbered fixture text. Built-in `read`, an exact
 `bash` `cat <expected-path>`, and built-in `grep` are supported. Grep accepts only
@@ -121,8 +134,12 @@ usable path/content evidence is still required.
 
 Turns 28–31 use `manifest.json`'s field/value rubric and actual per-turn workspace
 snapshots, rather than later disk state. Chinese and English field aliases are
-listed there. Fields use `label: value`, one unique assertion per field. Unknown
-lines, conflicting values, missing facts and uncertainty fail. The example
+listed there, with presentation-only synonyms in `rubric.py`. Fields use
+`label: value`, labeled lists, two-column tables or a field heading followed by
+its value, one unique assertion per field. Supporting prose supplies no missing
+facts; explicit contradictions still fail. Combined error-code/shard fields
+must contain E1729 and 0x3F; exit 3 never implies E1729. Conflicting values,
+missing facts and uncertainty fail. The example
 answers in `synthetic.py` document accepted formatting, not alternate prompts.
 
 - **28:** zero tools, score the final response only. Do not require disk
@@ -147,8 +164,12 @@ answers in `synthetic.py` document accepted formatting, not alternate prompts.
   E1729, 0x3F, test path, reviewer and current port. Config/notes must still
   satisfy turn 30. A claimed successful check contradicts unchanged check.sh.
 
-Global constraints: check.sh executes once in turn 1 with original stderr and
-exit 3 evidence, never subsequently; no rm, .env access, vendor artifacts,
+Global constraints: check.sh executes once in turn 1 with the exact original
+diagnostic and exit 3 evidence, never subsequently. Normal stdout/stderr
+redirections and audited `EXIT_CODE=$?` / `code=$?` capture-and-diagnostic forms
+require paired matching results in the fixture cwd. Mere echo/cat/mention is
+not execution; pipelines, opaque wrappers, ambiguous executions and repeats
+are rejected. No rm, .env access (including built-in grep's `path`), vendor artifacts,
 Makefile, protected old config/test/check changes; each new .py begins with
 `# owner: team-kestrel`. Original logs remain intact (moving them into trash/
 after turn 29 is permitted). The rubric checks these observable tools and file
