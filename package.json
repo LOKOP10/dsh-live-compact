@@ -17,6 +17,7 @@
   },
   "files": [
     "shell.js",
+    "adapter.js",
     "index.js",
     "gate.js",
     "plan.js",

@@ -18,9 +18,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
-import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { loadUpstream } from "./adapter.js";
 import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
@@ -36,6 +34,14 @@ import {
 } from "./shadow.js";
 import { buildSendLess, decideThunder } from "./thunder.js";
 import { OFFICIAL_COMPACTION_KIND, inCooldown, lastSourceKindSeq, resolveCooldownMs } from "./cooldown.js";
+
+const {
+  BasicCompactionEngine,
+  CompactionId,
+  toolPairingBalancedAfter,
+  toolPairingBalancedBefore,
+  createUserMessage,
+} = await loadUpstream();
 
 const MARK = "Spine extract.";
 const SPINE_SOURCE_KIND = "spine-checkpoint";

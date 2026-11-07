@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
+import { STOCK_ENGINE as STOCK } from "./adapter.js";
 
-const STOCK = "@deepseek-ai/dsh-compaction-basic";
 const OURS = "dsh-live-compact";
 const PRESET_IDS = new Set(["standard", "ptc", "minimal", "cordis", "preset-standard", "preset-ptc", "preset-minimal", "preset-cordis"]);
 export const GATE_SERVICE = "liveCompactPresetGate";

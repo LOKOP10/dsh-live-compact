@@ -6,6 +6,7 @@
  * 配置预先检查失败时不构造引擎，也不再构造原版，避免报错被盖成「服务已被注册」。
  * On a preflight failure, construct neither engine. Stock would register and hide the real error.
  */
+import { loadUpstream } from "./adapter.js";
 
 let Engine = null;
 let Stock = null;
@@ -25,16 +26,10 @@ if (process.env.SPINE_ENGINE_FAIL === "import") {
 }
 
 try {
-  const compaction = await import("@deepseek-ai/dsh-compaction");
-  CompactionEngine = compaction.CompactionEngine;
-  ManualCompactionError = compaction.ManualCompactionError;
-} catch (error) {
-  loadError ??= error instanceof Error ? error : new Error(String(error));
-}
-
-try {
-  const stock = await import("@deepseek-ai/dsh-compaction-basic");
-  Stock = stock.BasicCompactionEngine;
+  const upstream = await loadUpstream();
+  CompactionEngine = upstream.CompactionEngine;
+  ManualCompactionError = upstream.ManualCompactionError;
+  Stock = upstream.BasicCompactionEngine;
 } catch (error) {
   if (!loadError) loadError = error instanceof Error ? error : new Error(String(error));
 }

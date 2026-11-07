@@ -774,6 +774,19 @@ check("p0-15 README drops obsolete backup limits", () => {
   assert.equal(/\b(64|128)\s*Mi?B\b/i.test(readme), false);
 });
 
+check("p0-16 only adapter.js names a DSH package", () => {
+  const files = packageJavaScriptFiles(packageRoot);
+  assert.ok(files.length > 0);
+  for (const file of files) {
+    const names = /@deepseek-ai\//.test(readFileSync(file, "utf8"));
+    assert.equal(names, basename(file) === "adapter.js", file);
+  }
+});
+
+check("p0-16 package ships adapter.js", () => {
+  assert.equal(packageJson.files.includes("adapter.js"), true);
+});
+
 if (failures.length) {
   console.error(`p0 gate failed: ${failures.length}`);
   process.exit(1);
