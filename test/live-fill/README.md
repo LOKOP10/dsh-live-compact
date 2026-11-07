@@ -7,8 +7,13 @@ model/arm has **10 groups × 31 turns = 310 turns, exactly 230 FILL answers,
 This directory changes the harness only; it does not prove runtime compaction,
 PR #26/#27, Windows behavior, or release readiness.
 
+For the first release matrix, [SEMANTIC.md](SEMANTIC.md) governs preregistration,
+the full 920-final blind packet and signed independent review. FILL heuristics
+are diagnostics. Collection results are provisional without verified receipts;
+live initialization requires `--preregistration` before any model execution.
+
 Run the offline gate from the repository root (Python 3.9+, POSIX, standard
-library only):
+library plus local OpenSSL for semantic signature verification):
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/live-fill -p 'test_*.py' -v
@@ -344,7 +349,7 @@ predeclared A/B, B/A order, and finish each cell after all 10 groups. The script
 operate one cell/group at a time and never schedule paid calls on their own.
 
 ```bash
-python3 test/live-fill/run.py init --root "$LIVE_ROOT" --spec "$LIVE_SPEC"
+python3 test/live-fill/run.py init --root "$LIVE_ROOT" --spec "$LIVE_SPEC" --preregistration "$REGISTRATION"
 bash test/live-fill/run_one.sh 1
 # Repeat groups in the registered two-arm order, then:
 python3 test/live-fill/run.py finish --root "$LIVE_ROOT"

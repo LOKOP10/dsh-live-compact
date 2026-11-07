@@ -51,5 +51,5 @@ def validate_contract():
 def fingerprints():
     validate_contract()
     names = ["manifest.json", "prompts.json", "contract.py", "mkfx.py", "rubric.py",
-             "score.py", "run.py", "run_all.sh", "run_one.sh"]
+             "score.py", "run.py", "semantic.py", "SEMANTIC.md", "run_all.sh", "run_one.sh"]
     return {name: sha((HERE / name).read_bytes()) for name in names}
