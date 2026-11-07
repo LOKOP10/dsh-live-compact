@@ -60,6 +60,17 @@ function readExisting(file, toolCallId) {
   };
 }
 
+// Restart recovery is read-only: never manufacture an original from the surface.
+// Resolve only the requested ID, with the same permissions/meta checks as capture.
+export function readRawToolResult({ dir, toolCallId, access = {} }) {
+  const file = join(dir, rawName(toolCallId));
+  if (!existsSync(file)) return { ok: false, reason: "missing-file", toolCallId };
+  ensureShadowDir(dir, access);
+  tightenShadow(file, "file", access);
+  if (existsSync(`${file}.meta.json`)) tightenShadow(`${file}.meta.json`, "file", access);
+  return readExisting(file, toolCallId);
+}
+
 export function verifiedRaw(record, readFile = readFileSync) {
   const id = record?.toolCallId || "";
   if (!record?.ok || !record.path || !record.sha256 || !id) return { ok: false, toolCallId: id };
@@ -145,13 +156,7 @@ function captureToolResultLocked({
     return { ok: false, reason: "already-pruned", toolCallId };
   }
 
-  const readProtectedExisting = () => {
-    tightenShadow(file, "file", access);
-    if (existsSync(metaPath)) {
-      tightenShadow(metaPath, "file", access);
-    }
-    return readExisting(file, toolCallId);
-  };
+  const readProtectedExisting = () => readRawToolResult({ dir, toolCallId, access });
 
   let createdRaw = false;
 

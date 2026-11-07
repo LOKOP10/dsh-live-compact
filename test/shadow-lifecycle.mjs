@@ -1,0 +1,250 @@
+import assert from "node:assert/strict";
+import fs, { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { setImmediate } from "node:timers/promises";
+import { join } from "node:path";
+import test from "node:test";
+import { Session } from "@deepseek-ai/dsh-session";
+import { contentHash, pointerFor, PRUNE_MARKER, rawName } from "../raw.js";
+import { sessionDir } from "../shadow.js";
+import { fixture, runtime } from "./helpers/runtime.mjs";
+
+test("restart restores visible raw references before guarded prune and a real local cut", async (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine: first, ctx: firstContext } = h.engine();
+  h.capture(first, f);
+  const original = first.rawSeen.get(first.rawKey(f.session, "long"));
+  const fullText = readFileSync(original.path, "utf8");
+  // Persist a genuinely pruned surface backed by the earlier full raw file.
+  const oldResult = f.session.eventAt(f.longRound[1]).data;
+  const replacement = f.add("tool/result", { ...oldResult, message: {
+    ...oldResult.message, content: [{ type: "text", text: `head\n${PRUNE_MARKER}\ntail` }],
+  } }, 3000, { surfaceOp: { op: "replace", startSeq: f.longRound[1], endSeq: f.longRound[1] } });
+  f.longRound[1] = replacement;
+  first.captureSession(f.session);
+  const cursor = first.readCaptureCursor(f.session.id);
+  assert.equal(cursor, f.session.snapshotEvents().length);
+  const log = join(h.root, "session.json");
+  writeFileSync(log, JSON.stringify(f.session.snapshotEvents()));
+  await firstContext.fiber.dispose();
+  f.session = Session.create(f.session.id, JSON.parse(readFileSync(log, "utf8")));
+  h.use(f);
+  const { engine, ctx } = h.engine();
+  assert.equal(engine.rawSeen.size, 0);
+  engine.ensurePruneGuard();
+  assert.doesNotThrow(() => ctx.toolResultPruner.pruneSession(f.session));
+  assert.equal(h.pruneCalls, 1);
+  assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long"))?.ok, true);
+  assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long")).sha256, original.sha256);
+  await engine.finishTurn(f.agent());
+  assert.equal(f.summaries().length, 1);
+  assert.deepEqual(f.summaries()[0].data.shadowedSeqs, f.longRound);
+  const cuts = readdirSync(sessionDir(h.root, f.session.id)).filter((name) => name.startsWith("cut-") && name.endsWith(".txt"));
+  assert.equal(cuts.length, 1);
+  const backup = readFileSync(join(sessionDir(h.root, f.session.id), cuts[0]), "utf8");
+  assert.equal(backup.includes(fullText.trim()), true);
+  assert.equal(backup.includes(PRUNE_MARKER), false);
+});
+
+const damageCases = {
+  "missing raw": (file) => unlinkSync(file),
+  "missing meta": (file) => unlinkSync(`${file}.meta.json`),
+  "invalid meta JSON": (file) => writeFileSync(`${file}.meta.json`, "{"),
+  "wrong meta ID": (_file, meta) => ({ ...meta, toolCallId: "another-call" }),
+  "wrong meta bytes": (_file, meta) => ({ ...meta, bytes: meta.bytes + 1 }),
+  "wrong meta hash": (_file, meta) => ({ ...meta, sha256: "0".repeat(64) }),
+  "tampered body": (file) => writeFileSync(file, "tampered"),
+  "pruned body even with matching hash": (file, meta) => {
+    writeFileSync(file, PRUNE_MARKER);
+    return { ...meta, bytes: Buffer.byteLength(PRUNE_MARKER), sha256: contentHash(PRUNE_MARKER) };
+  },
+};
+for (const [name, damage] of Object.entries(damageCases)) {
+  test(`restart refuses ${name}, leaves the surface intact, and the next session works`, async (t) => {
+    const h = runtime(t);
+    const f = h.use(fixture());
+    const first = h.engine().engine;
+    h.capture(first, f);
+    const raw = first.rawSeen.get(first.rawKey(f.session, "long"));
+    const changed = damage(raw.path, JSON.parse(readFileSync(`${raw.path}.meta.json`, "utf8")));
+    if (changed && typeof changed === "object") writeFileSync(`${raw.path}.meta.json`, JSON.stringify(changed));
+    const before = JSON.stringify(f.session.snapshotEvents());
+    f.session = Session.create(f.session.id, JSON.parse(before));
+    h.use(f);
+    const { engine, ctx } = h.engine();
+    engine.ensurePruneGuard();
+    const surface = [...f.session.surface.nodes];
+    const eventHash = contentHash(JSON.stringify(f.session.snapshotEvents()));
+    assert.doesNotThrow(() => ctx.toolResultPruner.pruneSession(f.session));
+    assert.equal(h.pruneCalls, 0);
+    const refused = engine.rawSeen.get(engine.rawKey(f.session, "long"));
+    assert.equal(refused.ok, false);
+    assert.equal(pointerFor(refused), "无完整备份 [long]");
+    await engine.finishTurn(f.agent());
+    assert.equal(f.summaries().length, 0);
+    assert.deepEqual(f.session.surface.nodes, surface);
+    assert.equal(contentHash(JSON.stringify(f.session.snapshotEvents())), eventHash);
+    assert.equal(h.warnings.some((line) => line.includes("prune skipped")), true);
+    assert.equal(readdirSync(sessionDir(h.root, f.session.id)).some((name) => name.startsWith("cut-")), false);
+    const healthy = h.use(fixture());
+    h.capture(engine, healthy);
+    assert.doesNotThrow(() => ctx.toolResultPruner.pruneSession(healthy.session));
+    assert.equal(h.pruneCalls, 1);
+    await engine.finishTurn(healthy.agent());
+    assert.equal(healthy.summaries().length, 1);
+  });
+}
+
+test("recovery reads exact visible IDs, never enumerates backups or recaptures skipped history", (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const first = h.engine().engine;
+  h.capture(first, f);
+  // A replaced round remains in the event log but must not be recovered.
+  f.add("user/message", f.session.eventAt(f.lastUser).data, 80,
+    { surfaceOp: { op: "replace", startSeq: f.longRound[0], endSeq: f.longRound[1] } });
+  first.captureSession(f.session);
+  const { engine } = h.engine();
+  const reads = [];
+  const read = fs.readFileSync;
+  let captures = 0;
+  engine.captureOne = () => { captures++; throw new Error("historical recapture"); };
+  const readMock = t.mock.method(fs, "readFileSync", (file, ...args) => { reads.push(String(file)); return read(file, ...args); });
+  const scanMock = t.mock.method(fs, "readdirSync", () => { throw new Error("backup enumeration forbidden"); });
+  syncBuiltinESMExports();
+  try { engine.captureSession(f.session); }
+  finally { readMock.mock.restore(); scanMock.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(captures, 0);
+  assert.equal(reads.some((path) => path.includes(rawName("long"))), false);
+  for (const id of ["short-0", "short-1", "short-2"]) {
+    assert.equal(engine.rawSeen.get(engine.rawKey(f.session, id))?.ok, true);
+  }
+  assert.equal(engine.rawSeen.has(engine.rawKey(f.session, "long")), false);
+});
+
+test("legacy cursor migration, malformed/reset cursors and protected atomic files", (t) => {
+  const h = runtime(t);
+  const { engine } = h.engine();
+  const legacy = join(h.root, "spine-capture.json");
+  writeFileSync(legacy, JSON.stringify({ sessions: { old: 17, other: 99 } }));
+  assert.equal(engine.readCaptureCursor("old"), 17);
+  engine.writeCaptureCursor("old", 20);
+  assert.equal(engine.readCaptureCursor("old"), 20);
+  assert.equal(engine.readCaptureCursor("other"), 99);
+  assert.deepEqual(JSON.parse(readFileSync(legacy, "utf8")).sessions, { old: 17, other: 99 });
+  for (const body of ["{", JSON.stringify({ v: 1, key: "wrong", cursor: 7 }), JSON.stringify({ v: 1, key: "old", cursor: -1 })]) {
+    writeFileSync(engine.captureCursorFile("old"), body);
+    assert.equal(engine.readCaptureCursor("old"), null, "an invalid new cursor must not resurrect stale legacy state");
+  }
+  engine.writeCaptureCursor("old", 3);
+  assert.equal(engine.readCaptureCursor("old"), 3, "reset may move the cursor backwards");
+  for (const bad of [NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) engine.writeCaptureCursor("old", bad);
+  assert.equal(engine.readCaptureCursor("old"), 3);
+  const denied = { platform: "darwin", runner: () => false };
+  assert.equal(engine.readCaptureCursor("old", denied), null);
+  assert.doesNotThrow(() => engine.writeCaptureCursor("old", 100, denied));
+  assert.equal(engine.readCaptureCursor("old"), 3, "permission refusal must retain the last published cursor");
+  if (process.platform !== "win32") {
+    const dir = sessionDir(h.root, "old");
+    chmodSync(engine.captureCursorFile("old"), 0o644);
+    assert.equal(engine.readCaptureCursor("old"), 3);
+    assert.equal(statSync(engine.captureCursorFile("old")).mode & 0o777, 0o600);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+  }
+  const failed = engine.captureCursorFile("old");
+  const fileMock = t.mock.method(fs, "renameSync", () => { throw Object.assign(new Error("rename denied"), { code: "EACCES" }); });
+  syncBuiltinESMExports();
+  try { assert.doesNotThrow(() => engine.writeCaptureCursor("old", 4)); }
+  finally { fileMock.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(JSON.parse(readFileSync(failed, "utf8")).cursor, 3);
+  assert.equal(readdirSync(sessionDir(h.root, "old")).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("stale or malformed cursor limits recapture to the default three results", (t) => {
+  const h = runtime(t);
+  for (const cursor of [9999, -1, "bad"]) {
+    const f = h.use(fixture());
+    const { engine } = h.engine();
+    mkdirSync(sessionDir(h.root, f.session.id), { recursive: true });
+    writeFileSync(engine.captureCursorFile(f.session.id), JSON.stringify({ v: 1, key: f.session.id, cursor }));
+    const captured = [];
+    const capture = engine.captureOne.bind(engine);
+    engine.captureOne = (session, event) => { captured.push(event.data.message.toolCallId); return capture(session, event); };
+    engine.captureSession(f.session);
+    assert.deepEqual(captured, ["short-0", "short-1", "short-2"]);
+    assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long")).ok, false);
+    engine.ensurePruneGuard();
+    assert.doesNotThrow(() => engine.ctx.get("toolResultPruner").pruneSession(f.session));
+    assert.equal(h.pruneCalls, 0);
+  }
+});
+
+test("a stale cursor recaptures three results and restores valid older visible backups", async (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const first = h.engine().engine;
+  h.capture(first, f);
+  first.writeCaptureCursor(f.session.id, 9999);
+  const { engine, ctx } = h.engine();
+  const captured = [];
+  const capture = engine.captureOne.bind(engine);
+  engine.captureOne = (session, event) => { captured.push(event.data.message.toolCallId); return capture(session, event); };
+  engine.ensurePruneGuard();
+  ctx.toolResultPruner.pruneSession(f.session);
+  assert.deepEqual(captured, ["short-0", "short-1", "short-2"]);
+  assert.equal(h.pruneCalls, 1);
+  assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long"))?.ok, true);
+  await engine.finishTurn(f.agent());
+  assert.equal(f.summaries().length, 1);
+});
+
+test("two Node processes publish parseable cursors without losing distinct sessions", { timeout: 15000 }, async (t) => {
+  const h = runtime(t);
+  const { engine } = h.engine();
+  const keys = ["cursor.a", "cursora"]; // Same sanitized directory, distinct cursor files.
+  const moduleURL = new URL("../index.js", import.meta.url).href;
+  const script = `
+    import { Context } from '@deepseek-ai/cordis';
+    import Spine from ${JSON.stringify(moduleURL)};
+    const ctx = new Context(); ctx.logger = { warn() {} };
+    const engine = new Spine(ctx.isolate('compaction'), { auto: false });
+    process.send('ready');
+    process.once('message', async () => {
+      for (let i = 1; i <= 300; i++) {
+        engine.writeCaptureCursor(process.argv[1], i);
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      await ctx.fiber.dispose(); process.disconnect();
+    });`;
+  const children = keys.map((key) => spawn(process.execPath, ["--input-type=module", "-e", script, key], {
+    cwd: new URL("..", import.meta.url), env: { SPINE_SHADOW_DIR: h.root }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+  }));
+  t.after(() => { for (const child of children) if (child.exitCode === null) child.kill(); });
+  const exits = children.map((child) => new Promise((resolve, reject) => {
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`cursor worker exit ${code}: ${stderr}`)));
+  }));
+  await Promise.all(children.map((child) => new Promise((resolve) => child.once("message", resolve))));
+  for (const child of children) child.send("go");
+  let done = false;
+  const completion = Promise.all(exits).finally(() => { done = true; });
+  let observations = 0;
+  while (!done) {
+    for (const key of keys) {
+      const file = engine.captureCursorFile(key);
+      if (!existsSync(file)) continue;
+      const parsed = JSON.parse(readFileSync(file, "utf8"));
+      assert.equal(parsed.key, key);
+      assert.equal(Number.isSafeInteger(parsed.cursor), true);
+      observations++;
+    }
+    await setImmediate();
+  }
+  await completion;
+  assert.ok(observations > 0);
+  for (const key of keys) assert.equal(engine.readCaptureCursor(key), 300);
+});

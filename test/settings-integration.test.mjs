@@ -94,6 +94,9 @@ function host(t) {
     },
     async finish(engine, f = fixture()) {
       fixtures.set(f.session, f);
+      // A live host emits results before idle maintenance. Do not ask restart
+      // recovery to invent originals for history this fixture never captured.
+      for (const event of f.session.snapshotEvents()) ctx.emit("session/event", f.session, event);
       await engine.finishTurn(f.agent);
       const cut = !f.session.surface.nodes.includes(f.longResult);
       assert.equal(f.session.surface.nodes.some((seq) => f.session.eventAt(seq)?.data?.source?.kind === "spine-checkpoint"), cut);

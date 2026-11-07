@@ -13,14 +13,14 @@
  * Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
 import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
-import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
+import { captureOwnedToolResult, contentHash, rawExcerptText, readRawToolResult, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   discardShadowFiles,
   ensureShadowDir,
@@ -32,6 +32,7 @@ import {
   shadowAccessFused,
   shadowFileBody,
   shadowMaxBytes,
+  tightenShadow,
   writeShadowFile,
   writeShadowOwner,
   withShadowRoot,
@@ -630,6 +631,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const messages = [];
     for (const seq of shadowedSeqs) {
       const event = session.eventAt(seq);
+      if (event?.type === "tool/result") {
+        const id = event.data?.message?.toolCallId;
+        if (!id || !verifiedRaw(this.rawSeen.get(this.rawKey(session, id))).ok) {
+          throw new Error(`spine: raw backup missing before cut: ${id || "unknown"}`);
+        }
+      }
       messages.push({
         role: eventRole(session, seq),
         content: eventContent(session, seq),
@@ -859,11 +866,11 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   }
 
   captureNew(session, events, settings = readSettings(this.liveConfig)) {
+    if (!Array.isArray(events)) events = [];
     const key = session?.id || DEFAULT_KEY;
     let cursor = this.captureCursor.has(key) ? this.captureCursor.get(key) : this.readCaptureCursor(key);
     if (cursor == null) cursor = restartCaptureCursor(events, settings.keepRounds);
-    if (!Array.isArray(events)) cursor = 0;
-    else if (events.length < cursor) cursor = restartCaptureCursor(events, settings.keepRounds);
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || events.length < cursor) cursor = restartCaptureCursor(events, settings.keepRounds);
     let next = cursor;
     const seen = new Set();
     for (const event of events) {
@@ -881,33 +888,63 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     }
     this.captureCursor.set(key, next);
     this.writeCaptureCursor(key, next);
+    this.recoverVisibleRaw(session);
     return seen;
   }
 
-  readCaptureCursor(key) {
+  captureCursorFile(key) {
+    // Include the full key hash: sanitized directory names can alias each other.
+    return join(sessionDir(shadowDirectory(), key), `spine-capture-${contentHash(key)}.json`);
+  }
+
+  readCaptureCursor(key, access = {}) {
     if (this.persistCapture !== true) return null;
     try {
-      const file = join(shadowDirectory(), "spine-capture.json");
+      const current = this.captureCursorFile(key);
+      const legacy = !existsSync(current);
+      const file = legacy ? join(shadowDirectory(), "spine-capture.json") : current;
       if (!existsSync(file)) return null;
+      tightenShadow(shadowDirectory(), "dir", access);
+      if (!legacy) tightenShadow(sessionDir(shadowDirectory(), key), "dir", access);
+      tightenShadow(file, "file", access);
       const parsed = JSON.parse(readFileSync(file, "utf8"));
-      const cursor = parsed?.sessions?.[key];
-      return Number.isInteger(cursor) && cursor >= 0 ? cursor : null;
+      const cursor = legacy ? parsed?.sessions?.[key] : parsed?.key === key && parsed?.v === 1 ? parsed.cursor : null;
+      return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : null;
     } catch {
       return null;
     }
   }
 
-  writeCaptureCursor(key, cursor) {
-    if (this.persistCapture !== true) return;
+  writeCaptureCursor(key, cursor, access = {}) {
+    if (this.persistCapture !== true || !Number.isSafeInteger(cursor) || cursor < 0) return;
+    let tmp;
     try {
-      const dir = shadowDirectory();
-      mkdirSync(dir, { recursive: true });
-      const file = join(dir, "spine-capture.json");
-      const parsed = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
-      const sessions = parsed?.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {};
-      sessions[key] = cursor;
-      writeFileSync(file, JSON.stringify({ sessions }));
-    } catch {}
+      ensureShadowDir(shadowDirectory(), access);
+      const file = this.captureCursorFile(key);
+      tmp = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
+      // writeShadowFile normally renames before writing. Use its exclusive path
+      // here, then publish the complete, protected cursor with one rename.
+      writeShadowFile(tmp, JSON.stringify({ v: 1, key, cursor }), access, { exclusive: true });
+      renameSync(tmp, file);
+    } catch (error) {
+      noteShadowWarning(this.ctx?.logger, error);
+    } finally {
+      if (tmp) { try { unlinkSync(tmp); } catch {} }
+    }
+  }
+
+  recoverVisibleRaw(session, access = {}) {
+    const dir = sessionDir(shadowDirectory(), session?.id || DEFAULT_KEY);
+    for (const id of new Set(this.surfaceToolIds(session))) {
+      const mapKey = this.rawKey(session, id);
+      if (this.rawSeen.has(mapKey)) continue;
+      try {
+        this.rawSeen.set(mapKey, readRawToolResult({ dir, toolCallId: id, access }));
+      } catch (error) {
+        noteShadowWarning(this.ctx?.logger, error);
+        this.rawSeen.set(mapKey, { ok: false, reason: "unwritable", toolCallId: id });
+      }
+    }
   }
 
   captureSession(session) {
@@ -926,11 +963,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   }
 
   rawVerifiedSet(session) {
-    const prefix = `${session?.id || DEFAULT_KEY}\0`;
     const ids = new Set();
-    for (const [mapKey, record] of this.rawSeen) {
-      if (!mapKey.startsWith(prefix)) continue;
-      if (verifiedRaw(record).ok) ids.add(mapKey.slice(prefix.length));
+    for (const id of this.surfaceToolIds(session)) {
+      if (verifiedRaw(this.rawSeen.get(this.rawKey(session, id))).ok) ids.add(id);
     }
     return ids;
   }
@@ -952,8 +987,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const original = pruner.pruneSession.bind(pruner);
     function guarded(session) {
       const engine = pruner.__spineEngine;
-      engine.captureSession(session);
-      return runPruneAfterCapture(engine.surfaceToolIds(session), engine.rawVerifiedSet(session), () => original(session));
+      try {
+        engine.captureSession(session);
+        return runPruneAfterCapture(engine.surfaceToolIds(session), engine.rawVerifiedSet(session), () => original(session));
+      } catch (error) {
+        engine.ctx.logger?.warn?.(`spine: prune skipped: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     guarded.__spineGuarded = true;
     pruner.pruneSession = guarded;
