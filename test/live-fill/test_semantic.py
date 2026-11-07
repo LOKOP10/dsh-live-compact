@@ -213,7 +213,7 @@ class SemanticTests(unittest.TestCase):
                     result = dict(type='tool_result', callId='bad', status='completed', result='[exit code: 9]')
                     commands = {'forbidden-behavior': 'rm scratch', 'quoted-rm': '"rm" scratch',
                                 'wrapped-rm': 'sh -c "rm scratch"',
-                                'forbidden-import': 'python -c "import pandas, tenacity"',
+                                'forbidden-import': 'python -I -c "import pandas, tenacity"',
                                 'opaque-command': 'eval "$PAYLOAD"'}
                     if kind in commands:
                         # Audit inert log strings only; never execute these.
@@ -254,17 +254,26 @@ class SemanticTests(unittest.TestCase):
                         verify(self.policy, self.packet, self.mapping, self.receipts)
 
     def test_turn29_import_alias_rereads_are_nonwaivable(self):
-        commands = [(f"python3 -c 'from pathlib import Path as {alias}; "
+        commands = [(f"python3 -I -c 'from pathlib import Path as {alias}; "
                      f'{alias}("part" + "14.log").read_text()' + "'")
                     for alias in ('str', 'print', 'open', 'reader', 'read_text')]
         self.assert_turn29_behavior_nonwaivable(commands)
 
     def test_turn29_pattern_capture_rereads_are_nonwaivable(self):
         self.assert_turn29_behavior_nonwaivable([
-            "python3 -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
-            "python3 -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
-            "python3 -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -I -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -I -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
+            "python3 -I -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
         ])
+
+    def test_turn29_nonisolated_imports_are_nonwaivable(self):
+        self.assert_turn29_behavior_nonwaivable([
+            "python3 -c 'import csv'",
+            "python3 -c 'from pathlib import Path'",
+        ])
+
+    def test_turn29_outside_workspace_write_is_nonwaivable(self):
+        self.assert_turn29_behavior_nonwaivable(["printf safe > /tmp/lc112-audit-outside.txt"])
 
     def assert_turn29_behavior_nonwaivable(self, commands):
         path = self.roots['ds/candidate'] / 'runs/spine-1/t29.jsonl'

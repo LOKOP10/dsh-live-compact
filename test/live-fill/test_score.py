@@ -585,17 +585,26 @@ class FullCellTests(unittest.TestCase):
                         self.assertIn('g1/t30: forbidden part log reread', report['quality_errors'])
 
     def test_turn29_import_aliases_cannot_hide_reads_in_complete_evidence(self):
-        commands = [(f"python3 -c 'from pathlib import Path as {alias}; "
+        commands = [(f"python3 -I -c 'from pathlib import Path as {alias}; "
                      f'{alias}("part" + "14.log").read_text()' + "'")
                     for alias in ('str', 'print', 'open', 'reader', 'read_text')]
         self.assert_turn29_behavior_rejected(commands)
 
     def test_turn29_pattern_bindings_cannot_hide_reads_in_complete_evidence(self):
         self.assert_turn29_behavior_rejected([
-            "python3 -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
-            "python3 -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
-            "python3 -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -I -c 'match open:\n    case str:\n        print(str(\"part\" + \"14.log\").read())'",
+            "python3 -I -c 'from pathlib import Path\nmatch Path:\n    case str:\n        print(str(\"part\" + \"14.log\").read_text())'",
+            "python3 -I -c 'match {\"reader\": open}:\n    case {\"reader\": str}:\n        print(str(\"part\" + \"14.log\").read())'",
         ])
+
+    def test_turn29_nonisolated_imports_are_hard_behavior_failures(self):
+        self.assert_turn29_behavior_rejected([
+            "python3 -c 'import csv'",
+            "python3 -c 'from pathlib import Path'",
+        ])
+
+    def test_turn29_outside_workspace_write_is_a_hard_failure(self):
+        self.assert_turn29_behavior_rejected(["printf safe > /tmp/lc112-audit-outside.txt"])
 
     def assert_turn29_behavior_rejected(self, commands):
         group = self.root/'runs/spine-1'

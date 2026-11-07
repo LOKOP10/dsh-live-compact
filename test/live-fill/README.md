@@ -31,8 +31,8 @@ comparison budgets.
 
 ## Frozen inputs and fixture correction
 
-`prompts.json` remains byte-for-byte unchanged:
-`6b7e1d54d72af05533505905419b3b92940eae27faad52e899a1eb85a69e7d29`.
+`prompts.json` adds an isolated-Python invocation instruction to turn 1 before any collection. Turns 2–31 and all business facts remain unchanged. Both arms receive the same new prompt bytes:
+`99b3b29f79fb543cc1dd640f1aa0a1dc35fb441eceaba9856b25caa06c02f9c7`. The v1 hash was `6b7e1d54d72af05533505905419b3b92940eae27faad52e899a1eb85a69e7d29`; v1 attempts cannot be relabeled as v2.
 The runner reads it and verifies its hash; it never invokes `prompts.py` or
 rewrites repository inputs. `prompts.py` is retained only as historical source.
 
@@ -194,7 +194,7 @@ forms (`-v`, `%n`) fail. Status expansion is limited to output-only printf and
 moves with unproven executable identity remain opaque outside the verified
 archive exception, as does command resolution outside trusted system paths.
 Read-only standard-library Python/CSV and structured read/grep/write/edit remain
-supported. Python imports cannot rename members to another recognized builtin
+supported only through exact `python3 -I -c` or `python -I -c` shell forms. `-I` excludes workspace/user-site module shadowing; a module named `csv` in the workspace is not trusted as the standard library. Ordinary non-isolated `-c` is rejected. Python imports cannot rename members to another recognized builtin
 or reader name. Pattern matching, exception-handler bindings and type aliases
 are outside this small language and require command review. Binding checks must
 also pass on Python 3.10+; a Python 3.9 syntax rejection alone is not evidence
