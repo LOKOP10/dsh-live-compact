@@ -76,18 +76,30 @@ window.__ModuleLoader__.load({
         field.hint ? h("span", { style: { opacity: 0.6, fontSize: "0.85em" } }, t(field.hint)) : null);
     }
 
+    // 宿主给的是 { state, mutate }，但 state 在数据没到时可能是 undefined 或一个取值函数，两种都认。
+    function snapshotOf(form) {
+      const state = form && form.state;
+      return typeof state === "function" ? state() : state;
+    }
+
     function SettingsForm(props) {
       const { form, t } = props;
-      const state = form && form.state;
+      const state = snapshotOf(form);
       const [draft, setDraft] = React.useState(() => (state && state.value) || {});
       const [busy, setBusy] = React.useState(false);
       const [message, setMessage] = React.useState("");
 
+      const current = snapshotOf(form);
       React.useEffect(() => {
-        if (!busy) setDraft((form && form.state && form.state.value) || {});
-      }, [form && form.state && form.state.revision, form && form.state && form.state.status]);
+        if (!busy) setDraft((current && current.value) || {});
+      }, [current && current.revision, current && current.status]);
 
-      if (!state) return h("p", { role: "status" }, t("loading"));
+      if (!state) {
+        // 数据没到时把宿主实际给了什么显示出来，方便定位，不静默转圈。
+        const keys = Object.keys(props || {}).join(",");
+        const shape = form === undefined ? "form=undefined" : `form=${typeof form},state=${typeof (form && form.state)}`;
+        return h("p", { role: "status" }, `${t("loading")} [${shape}; view=${props.view}; keys=${keys}]`);
+      }
 
       const ready = state.status === "ready" && state.writable && state.mode === "host";
       const edit = (key, value) => {
@@ -129,7 +141,7 @@ window.__ModuleLoader__.load({
           type: "button",
           disabled: busy,
           onClick: () => {
-            setDraft((form && form.state && form.state.value) || {});
+            setDraft((snapshotOf(form) || {}).value || {});
             setMessage("");
           },
         }, t("reset"))),
