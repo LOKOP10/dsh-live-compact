@@ -30,10 +30,22 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
+## 1.1.2 Windows ACL 修正（候选，待原生复测）
+
+Windows 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM / Server 2022 x64）确认：1.1.1 的 `/inheritance:r /grant:r` 会留下其他主体的显式 ACE，第二个普通用户仍能读取备份。下面的修正还没有原生 Windows PASS，发布须等协调者的双用户复测。
+
+权限写入改为固定的 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`（Windows PowerShell 5.1 / .NET Framework），使用 `-NoProfile -NonInteractive -EncodedCommand`。脚本固定内嵌在已打包的 `shadow.js`，路径、SID、文件类型通过子进程环境传递，不拼进脚本。当前用户 SID 仍由固定 System32 `whoami.exe` 每进程获取一次，脚本再对照自身 Windows 身份。新建受保护的 DACL，只允许当前用户、SYSTEM、Administrators 完全控制；目录 ACE 带 OI/CI，直接修正的文件 ACE 不带继承标志。只修改 DACL，不提权，不改 owner、group 或 SACL，不使用临时宽松 ACL。写后读取实际 DACL，核验保护位、完整 ACE 数量、SID、Allow、权限及继承标志，收到确认才缓存。工具失败、超时、SID 非法或读回不符都会熔断本进程后续备份，不回退到 chmod。
+
+目录缓存核对规范路径、设备/文件编号及创建时间；替换目录或改指向的已知别名会拒绝后续备份。经确认目录内以 `wx` 新建的空文件，核对已打开句柄与路径指向同一文件后，使用继承的 allowlist，不逐文件启动子进程，写入正文前完成检查。既有文件不能只凭父目录缓存获得信任：仅在本进程已确认同一文件身份时复用缓存，否则对被请求的文件单独替换 DACL。拒绝文件符号链接、非普通文件及多硬链接文件。不扫描或批量修复历史备份；捕获/恢复所请求的旧 raw、meta、cursor 文件在使用时修正。未触及的旧文件（包括直接外部读取或 shadow-search 读取的旧文件）不保证已修复，也无法撤回此前泄露的数据。不要把 shadow 指向混有其他文件的目录。
+
+缓存信任同一用户和管理员不在进程运行期间原地改写 ACL；元数据核对不能发现同一文件上的 ACL 原地变更，也不能消除同用户/管理员并发改路径的全部竞态。SystemRoot/windir 必须指向可信 Windows 安装；文件系统须提供稳定文件身份并支持 Windows DACL，工具缺失或策略禁止运行时拒绝备份。Unix 仍使用目录 0700 / 文件 0600。切点、token/cap 策略、#27 根目录协调与重启口径不变。
+
+离线门禁包含 `node test/p0-gate.mjs`、`node --test test/windows-acl.test.mjs test/issue-20.mjs test/issue-27.mjs`（也加入 `npm run test:gate`）。这些 mock/结构检查不执行 Windows ACL API，不能证明另一个用户被拒绝。发布前须由协调者在上述两个 Windows 平台以两个独立、medium-integrity 非管理员账户验证：独立正向控制可读；预置 Everyone 显式可继承 RX 后，新建备份仍只有写者可读；预置显式宽松 ACE 的旧文件在父目录已缓存时被单独修正；核验目录和单独修正文件的保护位/完整 allowlist、新建文件实际继承的 allowlist、文件无 OI/CI、owner/SACL 未变，以及失败拒绝/清理。全部通过后才可发布。本独立补丁不改版本号。
+
 ## 1.1.1
 
 1. Windows 上取 SID 和写权限不再走 PATH。固定调用 `%SystemRoot%\System32` 下的 `whoami.exe` 和 `icacls.exe`。环境变量不是盘符绝对路径时，这次备份直接跳过，不退回裸命令名。
-2. 不再使用需要还原特权的 `icacls /restore`。目录用 `/inheritance:r /grant:r`，给当前用户、SYSTEM、Administrators 三条可继承的完全控制。文件只用 `F`，不带 `(OI)(CI)`。已收紧目录里的文件不再逐条跑 `icacls`。当前用户 SID 和目录权限每个进程只做一次。
+2. 当时用 `/inheritance:r /grant:r` 替代 `icacls /restore`；后续双用户实测确认它保留其他显式 ACE，不能实现完整 allowlist。修正及验证限制见上面的 1.1.2 候选说明。
 3. 权限失败不再把宿主打退出。这次备份不落盘，不退回 `chmod`，只提示一次。压缩照常进行。
 4. 进程重启后补抓工具结果，只补最近 3 轮。已经记下的位置还在，就从那里接着记。记下的位置比当前日志还大，按重启口径补最近 3 轮，不从 0 把整份日志再扫一遍。
 5. 一轮里有不少于 1000 token 的 `read`，这一刀只切这一轮，不把要留的后 3 轮短结果一起卷进去。这一轮里单个工具结果达到 3.2 万，只留指针。这一轮切不下来，才按原来的规则切更早的轮。
@@ -298,7 +310,7 @@ dsh-live-compact --version
 
 DSH-TUI 同样换不掉预设里的原版压缩，先不要装。
 
-被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`，只有自己能读。上限 256MB。快满时删最老的备份。卡片里的序号是会话日志的事件号。要在当前会话的备份里找一行，用 `import { searchShadow } from "dsh-live-compact/shadow-search"`。
+被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`。Unix 权限为目录 0700 / 文件 0600；Windows 新建/修正后的备份允许当前用户、SYSTEM、Administrators，历史文件及缓存限制见上面的 ACL 说明。上限 256MB。快满时删最老的备份。卡片里的序号是会话日志的事件号。要在当前会话的备份里找一行，用 `import { searchShadow } from "dsh-live-compact/shadow-search"`。
 
 `dsh-live-compact stats` 的 `saved` 是切完当下少掉的 token，`rewrite` 是同一次收尾实际要重写的尾巴，只记一次。同一步连切不会按刀数把尾巴乘上去。这两个数口径不同，比值不是盈亏。桌面端没有终端，`rg "spine cut"` 只在终端输出里找得到。逐刀明细在 shadow 目录的 `spine-cuts.jsonl`。
 

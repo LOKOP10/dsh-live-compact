@@ -35,7 +35,8 @@ import { basename, dirname, join, resolve, win32 } from "node:path";
 const DRIVE_ROOT = /^[A-Za-z]:[\\/]/;
 const PLUGIN_NAME = /^(?:(?:cut|official|shadow)-\d+-[0-9a-f]{8}|raw-[0-9a-f]{16}|\d+-[0-9a-f]{8}-[0-9a-f]{8}|\d+-[0-9a-f]{8,16})\.txt$/;
 let cachedSid = "";
-const lockedDirs = new Set();
+const lockedDirs = new Map();
+const lockedFiles = new Map();
 let shadowFuse = false;
 const shadowWarnings = new Set();
 
@@ -333,6 +334,7 @@ export function withShadowRoot(dir, action) {
 export function resetShadowAccessState() {
   cachedSid = "";
   lockedDirs.clear();
+  lockedFiles.clear();
   shadowFuse = false;
   shadowWarnings.clear();
 }
@@ -368,12 +370,37 @@ export function win32Tool(name, env = process.env) {
   return win32.join(root, "System32", name);
 }
 
-function lockKey(path) {
-  return resolve(path).replace(/[\\/]+$/, "").toLowerCase();
+function accessIdentity(info) {
+  if (info.ino <= 0n) return "";
+  return `${info.dev}:${info.ino}:${info.birthtimeNs}`;
+}
+
+function accessEntry(path, kind) {
+  const absolute = resolve(path);
+  // Directory aliases are supported, but cached aliases must keep pointing to
+  // the same object. Never follow a final file symlink or chmod a hard link.
+  const canonical = kind === "dir" ? realDirectory(absolute) : join(realDirectory(dirname(absolute)), basename(absolute));
+  const info = lstatSync(canonical, { bigint: true });
+  if (kind === "dir" ? !info.isDirectory() : !info.isFile() || info.nlink !== 1n) {
+    throw new Error("spine: unsupported shadow permission target");
+  }
+  return { absolute, canonical, identity: accessIdentity(info) };
+}
+
+function sameAccessEntry(left, right) {
+  return left.canonical === right.canonical && left.identity && left.identity === right.identity;
+}
+
+function lockedDirectory(entry) {
+  const previous = lockedDirs.get(entry.absolute) ?? lockedDirs.get(entry.canonical);
+  if (!previous) return false;
+  if (!sameAccessEntry(previous, entry)) throw new Error("spine: shadow permission directory identity changed");
+  lockedDirs.set(entry.absolute, previous);
+  return true;
 }
 
 export function shadowDirLocked(path) {
-  return lockedDirs.has(lockKey(path));
+  return lockedDirectory(accessEntry(path, "dir"));
 }
 
 export function noteShadowWarning(logger, error) {
@@ -544,25 +571,92 @@ export function recordCutStats(dir, { saved = 0, rewrite = 0 } = {}) {
   }
 }
 
+function validWindowsSid(sid) {
+  if (typeof sid !== "string" || sid.length > 184 || sid.trim() !== sid ||
+      !/^S-1-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*)){1,15}$/.test(sid)) return false;
+  const numbers = sid.slice(4).split("-").map(BigInt);
+  return numbers[0] <= 0xffffffffffffn && numbers.slice(1).every((number) => number <= 0xffffffffn);
+}
+
+// Fixed code only: path/SID/kind are process environment DATA, never PowerShell
+// source or command-line fragments. Full .NET Framework is supplied by the fixed
+// System32 WindowsPowerShell v1.0 executable (Windows PowerShell 5.1).
+const WINDOWS_ACL_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+try {
+  $path = [Environment]::GetEnvironmentVariable('DSH_SHADOW_ACL_PATH', 'Process')
+  $kind = [Environment]::GetEnvironmentVariable('DSH_SHADOW_ACL_KIND', 'Process')
+  $sidText = [Environment]::GetEnvironmentVariable('DSH_SHADOW_ACL_SID', 'Process')
+  if ([String]::IsNullOrEmpty($path) -or ($kind -ne 'dir' -and $kind -ne 'file')) { throw 'Invalid target' }
+  $userSid = [Security.Principal.SecurityIdentifier]::new($sidText)
+  if ($userSid.Value -cne $sidText -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne $sidText) { throw 'Invalid identity' }
+  $attributes = [IO.File]::GetAttributes($path)
+  if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse target' }
+  if ((($attributes -band [IO.FileAttributes]::Directory) -ne 0) -ne ($kind -eq 'dir')) { throw 'Wrong target kind' }
+  $sids = @($sidText, 'S-1-5-18', 'S-1-5-32-544')
+  $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $inheritance = [Security.AccessControl.InheritanceFlags]::None
+  if ($kind -eq 'dir') {
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+  } else {
+    $acl = [Security.AccessControl.FileSecurity]::new()
+  }
+  # A NEW descriptor, not GetAccessControl + grant replacement: no old explicit
+  # grant or deny can survive. Only Access is modified; owner/group/SACL are not.
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in $sids) {
+    if ($expected.Add($sid)) {
+      $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($sid),
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance, [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow)
+      $acl.AddAccessRule($rule)
+    }
+  }
+  if ($kind -eq 'dir') {
+    [IO.Directory]::SetAccessControl($path, $acl)
+    $actual = [IO.Directory]::GetAccessControl($path, [Security.AccessControl.AccessControlSections]::Access)
+  } else {
+    [IO.File]::SetAccessControl($path, $acl)
+    $actual = [IO.File]::GetAccessControl($path, [Security.AccessControl.AccessControlSections]::Access)
+  }
+  if (!$actual.AreAccessRulesProtected -or !$actual.AreAccessRulesCanonical) { throw 'Unprotected DACL' }
+  $rules = $actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+  if ($rules.Count -ne $expected.Count) { throw 'Unexpected ACE count' }
+  foreach ($rule in $rules) {
+    if (!$expected.Remove($rule.IdentityReference.Value) -or $rule.IsInherited -or
+        $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+        $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $rule.InheritanceFlags -ne $inheritance -or
+        $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'Unexpected ACE' }
+  }
+  if ($expected.Count -ne 0) { throw 'Missing ACE' }
+  [Console]::Out.Write('DSH_SHADOW_ACL_OK')
+  exit 0
+} catch {
+  # Never echo paths, identity output, or exception data into host logs.
+  exit 1
+}
+`;
+const WINDOWS_ACL_COMMAND = Buffer.from(WINDOWS_ACL_SCRIPT, "utf16le").toString("base64");
+
 export function shadowAccessPlan(platform = process.platform, userSid = "", kind = "dir") {
   if (platform === "win32") {
-    if (!/^S-\d+(?:-\d+)+$/.test(userSid)) {
+    if (!validWindowsSid(userSid)) {
       throw new Error("spine: current Windows user SID is required");
     }
-
-    // 文件不能带继承标志，否则 icacls 会把整条 ACE 当无效丢掉，留下空 DACL。
-    // Files reject (OI)(CI), so a file grant must not carry it.
-    const scope = kind === "dir" ? "(OI)(CI)" : "";
+    if (kind !== "dir" && kind !== "file") throw new Error("spine: invalid shadow permission kind");
 
     return {
       kind: "acl",
       usesChmodOnly: false,
-      inheritance: "remove",
-      grant: [
-        `*${userSid}:${scope}F`,
-        `*S-1-5-18:${scope}F`,
-        `*S-1-5-32-544:${scope}F`,
-      ],
+      replace: true,
+      protected: true,
+      inheritance: kind === "dir" ? ["ObjectInherit", "ContainerInherit"] : [],
+      allow: [...new Set([userSid, "S-1-5-18", "S-1-5-32-544"])],
+      rights: "FullControl",
     };
   }
 
@@ -594,10 +688,10 @@ export function defaultShadowAccessRunner({
   }
 
   let whoamiPath = "";
-  let icaclsPath = "";
+  let powershellPath = "";
   try {
     whoamiPath = win32Tool("whoami.exe", env);
-    icaclsPath = win32Tool("icacls.exe", env);
+    powershellPath = win32Tool("WindowsPowerShell\\v1.0\\powershell.exe", env);
   } catch (error) {
     tripFuse();
     throw error;
@@ -610,14 +704,16 @@ export function defaultShadowAccessRunner({
       identity = execFile(whoamiPath, ["/user", "/fo", "csv", "/nh"], {
         encoding: "utf8",
         windowsHide: true,
+        timeout: 10000,
+        maxBuffer: 65536,
       });
     } catch (error) {
       error.step = "whoami";
       tripFuse();
       throw error;
     }
-    const match = String(identity ?? "").match(/,"(S-\d+(?:-\d+)+)"\s*$/i);
-    if (!match) {
+    const match = String(identity ?? "").match(/^"(?:[^"\r\n]|"")*","(S-1-[\d-]+)"\s*$/);
+    if (!match || !validWindowsSid(match[1])) {
       const error = new Error("spine: cannot determine current Windows user SID");
       error.step = "whoami";
       tripFuse();
@@ -627,27 +723,44 @@ export function defaultShadowAccessRunner({
     cachedSid = sid;
   }
 
-  const plan = shadowAccessPlan("win32", sid, kind);
   try {
-    execFile(
-      icaclsPath,
-      [resolve(path), "/inheritance:r", "/grant:r", ...plan.grant],
-      { stdio: "pipe", windowsHide: true },
+    shadowAccessPlan("win32", sid, kind);
+    const before = accessEntry(path, kind);
+    // Also guard direct runner callers, including legacy files through aliases.
+    lockedDirectory(kind === "dir" ? before : accessEntry(dirname(path), "dir"));
+    const childEnv = Object.fromEntries(Object.entries(env).filter(([key]) =>
+      !/^DSH_SHADOW_ACL_(PATH|KIND|SID)$/i.test(key)));
+    Object.assign(childEnv, {
+      DSH_SHADOW_ACL_PATH: before.canonical,
+      DSH_SHADOW_ACL_KIND: kind,
+      DSH_SHADOW_ACL_SID: sid,
+    });
+    const result = execFile(
+      powershellPath,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", WINDOWS_ACL_COMMAND],
+      { env: childEnv, encoding: "utf8", stdio: "pipe", windowsHide: true, timeout: 15000, maxBuffer: 65536 },
     );
+    if (String(result).trim() !== "DSH_SHADOW_ACL_OK") throw new Error("spine: shadow DACL verification not confirmed");
+    const after = accessEntry(path, kind);
+    if (!sameAccessEntry(before, after)) throw new Error("spine: shadow permission target identity changed");
+    if (kind === "dir") {
+      lockedDirs.set(after.absolute, after);
+      lockedDirs.set(after.canonical, after);
+    } else {
+      lockedFiles.set(after.canonical, after);
+    }
   } catch (error) {
     error.step = kind === "file" ? "file" : "dir";
     tripFuse();
     throw error;
   }
 
-  if (kind === "dir") lockedDirs.add(lockKey(path));
   return true;
 }
 
 export function tightenShadow(path, kind = "dir", access = {}) {
   const platform = access.platform ?? process.platform;
   const windows = platform === "win32" && !access.runner;
-  if (windows && kind === "file" && shadowDirLocked(dirname(path))) return;
   if (windows && shadowFuse) {
     const error = new Error("spine: shadow permission action failed; backup refused");
     error.code = "ESHADOWACCESS";
@@ -661,6 +774,16 @@ export function tightenShadow(path, kind = "dir", access = {}) {
   }));
 
   try {
+    if (windows) {
+      if (kind === "dir" && shadowDirLocked(path)) return;
+      if (kind === "file") {
+        const parentLocked = shadowDirLocked(dirname(path));
+        const current = accessEntry(path, kind);
+        // A cached parent alone says nothing about an old file's explicit ACEs.
+        const previous = lockedFiles.get(current.canonical);
+        if (previous && sameAccessEntry(previous, current) && parentLocked) return;
+      }
+    }
     if (runner({ path, kind, platform, env: access.env, execFile: access.execFile }) !== true) {
       throw new Error("permission runner did not confirm success");
     }
@@ -678,10 +801,31 @@ export function tightenShadow(path, kind = "dir", access = {}) {
 
 export function ensureShadowDir(dir, access = {}) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const platform = access.platform ?? process.platform;
-  if (!access.runner && platform === "win32" && shadowDirLocked(dir)) return dir;
   tightenShadow(dir, "dir", access);
   return dir;
+}
+
+function tightenCreatedShadow(file, fd, access) {
+  if ((access.platform ?? process.platform) === "win32" && !access.runner && !shadowFuse) {
+    try {
+      if (shadowDirLocked(dirname(file))) {
+        const entry = accessEntry(file, "file");
+        const opened = fstatSync(fd, { bigint: true });
+        if (!entry.identity || entry.identity !== accessIdentity(opened) || opened.nlink !== 1n) {
+          throw new Error("spine: shadow created file identity changed");
+        }
+        // Only this wx-created object is known to inherit our confirmed DACL.
+        lockedFiles.set(entry.canonical, entry);
+      }
+    } catch (cause) {
+      tripFuse();
+      const error = new Error("spine: shadow permission action failed; backup refused", { cause });
+      error.code = "ESHADOWACCESS";
+      error.step = "file";
+      throw error;
+    }
+  }
+  tightenShadow(file, "file", access);
 }
 
 export function discardShadowFiles(files, cause, unlink = unlinkSync) {
@@ -751,9 +895,9 @@ function writeShadowFileLocked(file, body, access, { exclusive, write, unlink, a
       protectedPath = file;
     }
 
-    // Keep the caller's spelling for the existing permission cache/runner.
+    // Keep the caller's spelling for the permission cache/runner.
     // The opened descriptor and cleanup path remain in the canonical root.
-    tightenShadow(accessPath, "file", access);
+    tightenCreatedShadow(accessPath, fd, access);
     verifyRotationScope();
     if (parentIdentity && directoryIdentity(dir) !== parentIdentity) {
       retireRotationScope();

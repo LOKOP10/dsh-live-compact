@@ -6,8 +6,10 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep, win32 } from "node:path";
@@ -37,6 +39,7 @@ import {
   win32Tool,
   writeShadowOwner,
 } from "../shadow.js";
+import { windowsAclCall } from "./helpers/windows-acl.mjs";
 import { DEFAULTS, readSettings } from "../settings.js";
 import shellEntry from "../shell.js";
 
@@ -181,68 +184,53 @@ check("p0-2 out-of-cut tool is ignored", () => {
 check("p0-1 windows plan replaces the complete protected DACL", () => {
   const sid = "S-1-5-21-100-200-300-1001";
   const plan = shadowAccessPlan("win32", sid);
-
   assert.equal(plan.kind, "acl");
   assert.equal(plan.usesChmodOnly, false);
-  assert.equal(plan.inheritance, "remove");
-
-  assert.deepEqual(plan.grant, [
-    `*${sid}:(OI)(CI)F`,
-    "*S-1-5-18:(OI)(CI)F",
-    "*S-1-5-32-544:(OI)(CI)F",
-  ]);
-
-  assert.deepEqual(shadowAccessPlan("win32", sid, "file").grant, [
-    `*${sid}:F`,
-    "*S-1-5-18:F",
-    "*S-1-5-32-544:F",
-  ]);
+  assert.equal(plan.replace, true);
+  assert.equal(plan.protected, true);
+  assert.equal(plan.rights, "FullControl");
+  assert.deepEqual(plan.allow, [sid, "S-1-5-18", "S-1-5-32-544"]);
+  assert.deepEqual(plan.inheritance, ["ObjectInherit", "ContainerInherit"]);
+  assert.deepEqual(shadowAccessPlan("win32", sid, "file").inheritance, []);
 });
 
-check("p0-1 windows default runner applies the restrictive ACL", () => {
+check("p0-1 windows default runner replaces and verifies the protected DACL", () => {
   const sid = "S-1-5-21-100-200-300-1001";
-  const target = join(tmpdir(), "spine-p0-windows", "session");
+  const root = mkdtempSync(join(tmpdir(), "spine-p0-windows-"));
   const env = { SystemRoot: "D:\\WinX" };
   const whoami = win32Tool("whoami.exe", env);
-  const icacls = win32Tool("icacls.exe", env);
-
-  for (const kind of ["dir", "file"]) {
+  try {
+    for (const kind of ["dir", "file"]) {
+      const target = join(root, kind);
+      if (kind === "dir") mkdirSync(target);
+      else writeFileSync(target, "");
+      resetShadowAccessState();
+      const calls = [];
+      const execFile = (file, args, options) => {
+        calls.push({ file, args: [...args] });
+        if (file === whoami) return `"DESKTOP-P0","${sid}"`;
+        const action = windowsAclCall(file, args, options, env, sid);
+        assert.equal(action.path, realpathSync.native(target));
+        assert.equal(action.kind, kind);
+        return "DSH_SHADOW_ACL_OK";
+      };
+      assert.equal(defaultShadowAccessRunner({ path: target, kind, platform: "win32", execFile, env }), true);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0].file, whoami);
+      assert.deepEqual(calls[0].args, ["/user", "/fo", "csv", "/nh"]);
+      assert.equal(calls.some((call) => String(call.file).includes("C:\\Windows")), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
     resetShadowAccessState();
-    const calls = [];
-    const execFile = (file, args) => {
-      calls.push({ file, args: [...args] });
-      if (file === whoami) return `"DESKTOP-P0","${sid}"`;
-      assert.equal(file, icacls);
-      return "";
-    };
-
-    assert.equal(defaultShadowAccessRunner({
-      path: target,
-      kind,
-      platform: "win32",
-      execFile,
-      env,
-    }), true);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].file, whoami);
-    assert.deepEqual(calls[0].args, ["/user", "/fo", "csv", "/nh"]);
-    assert.equal(calls[1].file, icacls);
-    assert.equal(calls[1].args.includes("/restore"), false);
-    assert.deepEqual(calls[1].args, [
-      resolve(target),
-      "/inheritance:r",
-      "/grant:r",
-      ...shadowAccessPlan("win32", sid, kind).grant,
-    ]);
-    assert.equal(calls.some((call) => String(call.file).includes("C:\\Windows")), false);
   }
 });
 
-check("p0-1 windows icacls failure closes the write", () => {
+check("p0-1 windows DACL replacement failure closes the write", () => {
   const sid = "S-1-5-21-100-200-300-1001";
   const env = { SystemRoot: "D:\\WinX" };
   const whoami = win32Tool("whoami.exe", env);
-  const icacls = win32Tool("icacls.exe", env);
+  const powershell = win32Tool("WindowsPowerShell\\v1.0\\powershell.exe", env);
   const target = mkdtempSync(join(tmpdir(), "spine-p0-denied-"));
   try {
     resetShadowAccessState();
@@ -255,12 +243,12 @@ check("p0-1 windows icacls failure closes the write", () => {
         execFile(file) {
           calls.push(file);
           if (file === whoami) return `"DESKTOP-P0","${sid}"`;
-          throw Object.assign(new Error("injected icacls failure"), { status: 1300 });
+          throw Object.assign(new Error("injected DACL failure"), { status: 1300 });
         },
       }),
       (error) => error?.code === "ESHADOWACCESS",
     );
-    assert.deepEqual(calls, [whoami, icacls]);
+    assert.deepEqual(calls, [whoami, powershell]);
     if (process.platform !== "win32") {
       assert.equal(statSync(target).mode & 0o777, 0o755);
     }
