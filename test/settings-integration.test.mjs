@@ -11,7 +11,7 @@ import { createAssistantMessage, createSystemMessage, createToolResultMessage, c
 import Entry from "../shell.js";
 import Spine from "../index.js";
 import { STOCK_ENGINE } from "../adapter.js";
-import { rewritePresetConfig } from "../gate.js";
+import Gate, { rewritePresetConfig } from "../gate.js";
 import { DEFAULTS, ENV, engineConfig, readSettings } from "../settings.js";
 
 // Only these plugin test variables are read or changed. Never use a real profile.
@@ -69,13 +69,13 @@ function host(t) {
   const warnings = [];
   let modelCalls = 0;
   const forbiddenModelCall = () => { modelCalls++; throw new Error("network/model calls are forbidden"); };
-  ctx.logger = { info() {}, debug() {}, warn: (message) => warnings.push(message) };
-  ctx.sessions = { flush: async () => {}, prune() {} };
-  ctx.tokenMeter = {
+  ctx.logger = { info() {}, debug() {}, warn: (message) => warnings.push(message), error: (error) => warnings.push(String(error)) };
+  ctx.provide("sessions", { flush: async () => {}, prune() {} });
+  ctx.provide("tokenMeter", {
     measure: (session) => fixtures.get(session).measure(),
     estimateMessage: () => 200,
-  };
-  ctx.llm = new Proxy({}, { get: () => forbiddenModelCall });
+  });
+  ctx.provide("llm", new Proxy({}, { get: () => forbiddenModelCall }));
   t.after(async () => {
     await ctx.fiber.dispose();
     assert.equal(modelCalls, 0, "local cuts must make zero model calls");
@@ -173,6 +173,69 @@ test("stock defaults and env precedence also survive actual schema and root pres
   } finally { delete process.env.SPINE_HEADROOM_TOKENS; }
 });
 
+test("real entry and direct Spine resolve low thresholds and legacy retention identically", (t) => {
+  const h = host(t);
+  const cases = [
+    { thresholdRatio: 0.1 },
+    { thresholdRatio: 0.05 },
+    { thresholdRatio: 0.1, retainRatio: 0.05 },
+    { thresholdRatio: 0.1, retainTokens: 4096, maxTokens: 2048 },
+    { thresholdRatio: 0.1, modelPolicies: [{ provider: "test", model: "local", thresholdRatio: 0.05 }] },
+    { thresholdRatio: 0.1, ...stockFields, retainRatio: 0.05 },
+  ];
+  for (const raw of cases) {
+    const config = Entry.Config(raw);
+    const direct = new Spine(h.ctx.isolate("compaction"), config);
+    const entry = new Entry(h.ctx.isolate("compaction"), config);
+    assert.ok(entry instanceof Spine, JSON.stringify(raw));
+    assert.deepEqual(entry.config, direct.config);
+    assert.equal(entry.config.auto, true);
+    if (raw.retainRatio === undefined && raw.retainTokens === undefined) assert.equal(entry.config.retainTokens, 8192);
+  }
+  process.env.SPINE_THRESHOLD_RATIO = "0.1";
+  process.env.SPINE_RETAIN_TOKENS = "4096";
+  try {
+    const { engine } = h.engine();
+    assert.ok(engine instanceof Spine);
+    assert.equal(engine.config.thresholdRatio, 0.1);
+    assert.equal(engine.config.retainTokens, 4096);
+    assert.equal(h.engine({ retainRatio: 0.05 }).engine.config.retainTokens, undefined);
+  } finally {
+    delete process.env.SPINE_THRESHOLD_RATIO;
+    delete process.env.SPINE_RETAIN_TOKENS;
+  }
+});
+
+test("real entry preserves native stock errors and releases only its failed service", async (t) => {
+  const h = host(t);
+  const healthyContext = h.ctx.isolate("compaction");
+  const healthy = h.engine({}, Entry, healthyContext).engine;
+  const cases = [
+    { thresholdRatio: 0.1, retainRatio: 0.2 },
+    { thresholdRatio: 0.1, retainRatio: 0.2, typoStockField: 1 },
+    { thresholdRatio: 0.1, retainRatio: 0.2, summarizationProvider: "test" },
+    { retainRatio: 0.1, retainTokens: 8192 },
+    { thresholdRatio: 2 },
+    { headroomTokens: 0 },
+    { modelPolicies: [stockFields.modelPolicies[0], stockFields.modelPolicies[0]] },
+    { modelPolicies: [{ provider: "test", model: "local", retainRatio: 0.9 }] },
+  ];
+  for (const raw of cases) {
+    const config = Entry.Config({ auto: false, ...raw });
+    let expected;
+    assert.throws(() => new Spine(h.ctx.isolate("compaction"), config), (error) => {
+      expected = error.message;
+      return true;
+    });
+    const context = h.ctx.isolate("compaction");
+    const unavailable = new Entry(context, config);
+    assert.equal(unavailable.reason, expected);
+    assert.equal(context.get("compaction", false).reason, expected);
+    await assert.rejects(unavailable.compactNow(), (error) => error.message.endsWith(expected));
+    assert.equal(healthyContext.get("compaction", false).config, healthy.config);
+  }
+});
+
 test("volatile save and reset affect the next maintenance on the same engine", async (t) => {
   const h = host(t);
   const { engine, config } = h.engine({ minTokens: 25000 });
@@ -247,6 +310,114 @@ test("shell-installed gate forwards root settings, preset overrides win, old pre
   updateVolatile(root.config.takeoverPresets, Entry.Config({ takeoverPresets: false }).takeoverPresets);
   assert.equal(h.preset().name, STOCK_ENGINE);
   assert.equal(first.name, "dsh-live-compact");
+});
+
+for (const legacyFirst of [true, false]) {
+  test(`real Context root owns the sole gate with legacy ${legacyFirst ? "before" : "after"} root, including reload`, async (t) => {
+    const h = host(t);
+    const listenerCount = () => h.ctx.events._hooks["internal/config"]?.length ?? 0;
+    const rootScope = h.ctx.isolate("compaction");
+    const loadRoot = async () => {
+      const fiber = await rootScope.plugin(Entry, { auto: false, takeoverPresets: false, minTokens: 25000 });
+      assert.equal(fiber.state, 2, String(fiber._error));
+      assert.ok(fiber.ctx.compaction instanceof Spine);
+      return fiber;
+    };
+    const loadLegacy = async () => {
+      const fiber = await h.ctx.plugin(Gate, { takeoverPresets: true, minTokens: 12000 });
+      assert.equal(fiber.state, 2, String(fiber._error));
+      return fiber;
+    };
+    let legacy;
+    let root;
+    if (legacyFirst) {
+      legacy = await loadLegacy();
+      assert.equal(h.preset().config.minTokens, 12000);
+      root = await loadRoot();
+    } else {
+      root = await loadRoot();
+      legacy = await loadLegacy();
+    }
+    assert.equal(listenerCount(), 1);
+    assert.equal(h.preset().name, STOCK_ENGINE);
+
+    updateVolatile(root.config.takeoverPresets, Entry.Config({ takeoverPresets: true }).takeoverPresets);
+    const inherited = h.preset();
+    assert.equal(inherited.name, "dsh-live-compact");
+    assert.equal(inherited.config.minTokens, 25000);
+    const nestedParent = await h.ctx.plugin(function presetGroup() {});
+    const loadNested = async () => {
+      const fiber = await nestedParent.ctx.isolate("compaction").plugin(Entry, {
+        auto: false, takeoverPresets: true, minTokens: 5000,
+      });
+      assert.equal(fiber.state, 2, String(fiber._error));
+      return fiber;
+    };
+    const nested = await loadNested();
+    assert.equal(h.preset().config.minTokens, 25000, "nested settings cannot become root settings");
+    assert.equal(h.preset({ minTokens: 21000 }).config.minTokens, 21000, "explicit preset settings still win");
+    updateVolatile(root.config.takeoverPresets, Entry.Config({ takeoverPresets: false }).takeoverPresets);
+    assert.equal(h.preset().name, STOCK_ENGINE);
+
+    await legacy.dispose();
+    assert.equal(listenerCount(), 1, "disposing the old gate must not remove the root listener");
+    legacy = await loadLegacy();
+    assert.equal(listenerCount(), 1);
+    assert.equal(h.preset().name, STOCK_ENGINE);
+    await root.dispose();
+    assert.equal(listenerCount(), 0);
+    await nested.dispose();
+    await loadNested();
+    await legacy.dispose();
+    legacy = await loadLegacy();
+    assert.equal(listenerCount(), 0, "nested/legacy reload cannot replace a disposed root's authority");
+    assert.equal(h.preset().name, STOCK_ENGINE);
+    root = await loadRoot();
+    assert.equal(listenerCount(), 1);
+    assert.equal(h.preset().name, STOCK_ENGINE);
+    assert.equal(inherited.config.minTokens, 25000, "existing presets remain snapshots");
+    await root.restart();
+    await root.await();
+    assert.equal(root.state, 2, String(root._error));
+    assert.equal(listenerCount(), 1);
+    assert.equal(h.preset().name, STOCK_ENGINE);
+    updateVolatile(root.config.takeoverPresets, Entry.Config({ takeoverPresets: true }).takeoverPresets);
+    assert.equal(h.preset().config.minTokens, 25000, "reloaded root retains its numeric settings");
+  });
+}
+
+test("real Context compatibility gate alone keeps its settings across reload", async (t) => {
+  const h = host(t);
+  const legacy = await h.ctx.plugin(Gate, { minTokens: 23000 });
+  assert.equal(legacy.state, 2, String(legacy._error));
+  assert.equal(h.preset().config.minTokens, 23000);
+  await legacy.restart();
+  await legacy.await();
+  assert.equal(legacy.state, 2, String(legacy._error));
+  assert.equal(h.ctx.events._hooks["internal/config"].length, 1);
+  assert.equal(h.preset().config.minTokens, 23000);
+  await legacy.dispose();
+  assert.equal(h.ctx.events._hooks["internal/config"].length, 0);
+  assert.equal(h.preset().name, STOCK_ENGINE);
+});
+
+test("real Context root supersedes a nested entry loaded after the compatibility gate", async (t) => {
+  const h = host(t);
+  const legacy = await h.ctx.plugin(Gate, { minTokens: 12000 });
+  const group = await h.ctx.plugin(function presetGroup() {});
+  const nested = await group.ctx.isolate("compaction").plugin(Entry, { auto: false, minTokens: 5000 });
+  assert.equal(nested.state, 2, String(nested._error));
+  const root = await h.ctx.isolate("compaction").plugin(Entry, {
+    auto: false, takeoverPresets: false, minTokens: 25000,
+  });
+  assert.equal(root.state, 2, String(root._error));
+  assert.equal(h.ctx.events._hooks["internal/config"].length, 1);
+  assert.equal(h.preset().name, STOCK_ENGINE);
+  await nested.dispose();
+  await legacy.dispose();
+  updateVolatile(root.config.takeoverPresets, Entry.Config({ takeoverPresets: true }).takeoverPresets);
+  assert.equal(h.preset().config.minTokens, 25000);
+  assert.equal(h.ctx.events._hooks["internal/config"].length, 1);
 });
 
 test("nested and legacy preset callers preserve explicit retention mode and don't mutate input", () => {

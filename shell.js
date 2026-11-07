@@ -3,11 +3,11 @@
  * Thin entry. This file must evaluate even when the engine cannot load.
  * A throw here leaves stock disabled and /compact waiting.
  *
- * 配置预先检查失败时不构造引擎，也不再构造原版，避免报错被盖成「服务已被注册」。
- * On a preflight failure, construct neither engine. Stock would register and hide the real error.
+ * 预检查只解析配置，校验交给实际引擎；构造失败时释放本次注册，不重试原版盖掉报错。
+ * Resolve config before construction; let the engine validate it and preserve its actual error.
  */
 import { loadBase, loadCompaction, loadSchema } from "./adapter.js";
-import { configSchema, configSnapshot, engineConfig } from "./settings.js";
+import { configSchema, engineConfig } from "./settings.js";
 import { installPresetGate } from "./gate.js";
 
 let Engine = null;
@@ -56,15 +56,7 @@ function reasonText(error) {
 }
 
 export function preflightConfig(config = {}) {
-  if (!config || typeof config !== "object") return;
-  config = configSnapshot(config);
-  const threshold = config.thresholdRatio;
-  if (typeof threshold !== "number") return;
-  if (config.retainTokens !== undefined) return;
-  const ratio = config.retainRatio ?? 0.16;
-  if (ratio >= threshold) {
-    throw new Error(`BasicCompactionConfig: retainRatio (${ratio}) must be less than the resolved thresholdRatio (${threshold})`);
-  }
+  return engineConfig(config);
 }
 
 function compactionRecord(ctx) {
@@ -118,11 +110,12 @@ export default class LiveCompactEntry {
     installPresetGate(ctx, config);
     const previousCompaction = compactionRecord(ctx);
     let cause = loadError;
+    let resolvedConfig;
     let skipStock = process.env.SPINE_ENGINE_FAIL === "construct";
     if (skipStock) cause = new Error("spine: constructor refused");
     if (!loadError && !skipStock) {
       try {
-        preflightConfig(config);
+        resolvedConfig = preflightConfig(config);
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
         skipStock = true;
@@ -130,7 +123,7 @@ export default class LiveCompactEntry {
     }
     if (!loadError && !skipStock && Engine) {
       try {
-        return new Engine(ctx, config);
+        return new Engine(ctx, config, resolvedConfig);
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
         releaseCompaction(ctx, previousCompaction);

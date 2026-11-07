@@ -84,21 +84,37 @@ function engineEntry(node) {
   return null;
 }
 
-// One host listener, owned by the first (root) entry, never one per preset engine.
+// A compatibility gate is provisional. The shallowest real entry owns the one
+// listener; retain its authority while unloaded so nested/legacy reloads cannot
+// silently enable takeover again.
 const installedGates = new WeakMap();
 
-export function installPresetGate(ctx, config = {}) {
-  if (installedGates.has(ctx.root)) return;
-  installedGates.set(ctx.root, true);
-  ctx.effect(() => () => installedGates.delete(ctx.root));
+function entryDepth(ctx) {
+  let depth = 0;
+  for (let fiber = ctx.fiber; fiber?.runtime; fiber = fiber.parent.fiber) depth++;
+  return depth;
+}
+
+export function installPresetGate(ctx, config = {}, { legacy = false } = {}) {
+  const depth = entryDepth(ctx);
+  const previous = installedGates.get(ctx.root);
+  if (previous) {
+    if (legacy && !previous.legacy) return;
+    if (legacy === previous.legacy && (depth > previous.depth || (depth === previous.depth && previous.active))) return;
+    previous.active = false;
+    previous.disposeListener?.();
+  }
+  const gate = { depth, legacy, active: true };
+  installedGates.set(ctx.root, gate);
+  ctx.effect(() => () => { gate.active = false; });
   const enabled = () => {
     const value = config.takeoverPresets ?? true;
     return typeof value === "boolean" ? value : value.get();
   };
   const seen = new Set();
-  ctx.on("internal/config", function (_raw, next) {
+  gate.disposeListener = ctx.on("internal/config", function (_raw, next) {
     const resolved = next();
-    if (!enabled()) return resolved;
+    if (!gate.active || !enabled()) return resolved;
     const loadable = packageLoadable();
     const rewritten = rewritePresetConfig(resolved, loadable, config);
     const id = rewritten?.id || rewritten?.config?.id;
@@ -119,6 +135,6 @@ export function installPresetGate(ctx, config = {}) {
 // Legacy entry for existing compositions; new installs only register compaction-spine.
 export default class LiveCompactGate {
   constructor(ctx, config) {
-    installPresetGate(ctx, config);
+    installPresetGate(ctx, config, { legacy: true });
   }
 }

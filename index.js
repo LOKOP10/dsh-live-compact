@@ -426,9 +426,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   captureCursor = new Map();
   pruneGuarded = false;
 
-  constructor(ctx, config) {
+  constructor(ctx, config, resolvedConfig) {
     if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
-    super(ctx, engineConfig(config));
+    super(ctx, resolvedConfig ?? engineConfig(config));
     this.persistCapture = true;
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     this.liveConfig = config;
