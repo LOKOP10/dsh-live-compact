@@ -193,7 +193,7 @@ def run_group(root, rid, executable='dsh', timeout=None):
             meta['projection_truncations'] = result['projection_truncations']
             meta['model_tool_errors'] = result['model_tool_errors']
             errors += result['evidence_errors']
-            quality += result['quality_errors'] + behavior(turn, result['calls'], snap, initial)
+            quality += result['quality_errors'] + behavior(turn, result['calls'], snap, initial, cwd=cwd)
             sid = result['session_id']
         except (OSError, ValueError, KeyError, TypeError) as error:
             errors.append('parse/snapshot failure: ' + type(error).__name__)

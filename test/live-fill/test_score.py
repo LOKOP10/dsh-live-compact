@@ -521,10 +521,10 @@ class FullCellTests(unittest.TestCase):
                 path.write_bytes(old)
 
     @contextlib.contextmanager
-    def bad_answer(self, root):
+    def bad_answer(self, root, answer='WARN: 15\nNONE'):
         path = root/'runs/spine-1/t2.jsonl'
         items = [json.loads(x) for x in path.read_text().splitlines()]
-        items[-1]['text'] = 'WARN: 15\nNONE'
+        items[-1]['text'] = answer
         data = ''.join(json.dumps(x)+'\n' for x in items).encode()
         with contextlib.ExitStack() as stack:
             stack.enter_context(self.changed(path, data))
@@ -544,6 +544,46 @@ class FullCellTests(unittest.TestCase):
         self.assertFalse(report['cache_release_pass'])
         self.assertFalse((self.root/'work/spine-1/recall.md').exists())
 
+    def test_complete_cell_allows_proven_archive_but_still_rejects_reads(self):
+        group = self.root/'runs/spine-1'
+        cwd = self.root/'work/spine-1'
+        path = group/'t30.jsonl'
+        original = [json.loads(x) for x in path.read_text().splitlines()]
+        command = 'mkdir -p trash; mv part*.log trash/'
+        with contextlib.ExitStack() as snapshots:
+            # Carry the verified movement through both remaining snapshots.
+            for turn in (30, 31):
+                target = group/f't{turn}.snapshot.json'
+                snap = read_json(target)
+                for name in list(snap['files']):
+                    if name.startswith('part'):
+                        snap['files']['trash/'+name] = snap['files'].pop(name)
+                data = json.dumps(snap).encode()
+                snapshots.enter_context(self.changed(target, data))
+                target = group/f't{turn}.meta.json'
+                meta = read_json(target);meta['snapshot_sha256'] = sha(data)
+                snapshots.enter_context(self.changed(target, json.dumps(meta).encode()))
+            for shell, allowed in ((command, True), (command+'; cat trash/part2.log', False)):
+                with self.subTest(shell=shell), contextlib.ExitStack() as logs:
+                    items = copy.deepcopy(original)
+                    items[3:3] = [dict(type='tool_call', callId='archive', tool='bash',
+                                      input={'command':shell, 'workdir':str(cwd)}),
+                                  dict(type='tool_result', callId='archive', status='completed',
+                                       result='[exit code: 0]')]
+                    data = ''.join(json.dumps(x)+'\n' for x in items).encode()
+                    logs.enter_context(self.changed(path, data))
+                    for suffix in ('.meta.json', '.process.json'):
+                        target = path.with_suffix(suffix)
+                        meta = read_json(target);meta['stdout_sha256'] = sha(data)
+                        logs.enter_context(self.changed(target, json.dumps(meta).encode()))
+                    report = score_cell(self.root)
+                    self.assertTrue(report['evidence_pass'], report['evidence_errors'])
+                    self.assertEqual(report['gate_pass'], allowed, report['quality_errors'])
+                    self.assertEqual((report['complete_turns'], report['planned_turns'],
+                                      report['fill_correct'], report['planned_fill']), (310, 310, 230, 230))
+                    if not allowed:
+                        self.assertIn('g1/t30: forbidden part log reread', report['quality_errors'])
+
     def test_candidate_wrong_nonzero_stock_wrong_reported(self):
         for root in (self.root,self.stock):
             with self.bad_answer(root):
@@ -552,6 +592,16 @@ class FullCellTests(unittest.TestCase):
                 self.assertEqual(report['fill_correct'],229)
                 self.assertFalse(report['answer_pass'])
                 self.assertEqual(report['gate_pass'],root == self.stock)
+
+    def test_sample_cannot_hide_wrong_count_in_complete_cell(self):
+        answer = 'WARN: 5\nNONE\nThere are 6 WARN lines. Example: WARN ledger drift turn=2 n=0'
+        with self.bad_answer(self.root, answer):
+            report = score_cell(self.root)
+            self.assertTrue(report['evidence_pass'])
+            self.assertFalse(report['gate_pass'])
+            self.assertEqual((report['complete_turns'], report['planned_turns'],
+                              report['fill_correct'], report['planned_fill']), (310, 310, 229, 230))
+            self.assertEqual((report['warn_correct'], report['notice_correct']), (229, 230))
 
     def test_wrong_candidate_cli_nonzero(self):
         with self.bad_answer(self.root):

@@ -36,12 +36,76 @@ class AnswerGrammarTests(unittest.TestCase):
         self.assertEqual(fill_answer(f'WARN: 7\n{original}\n| 261 | {original} |', 4), [])
         self.assertEqual(fill_answer(f'WARN: 7\nNOTICE 原文行：\nLine 261: {original}', 4), [])
 
+    def test_warn_citation_does_not_hide_supplemental_count(self):
+        excerpt = 'WARN ledger drift turn=2 n=0'
+        for claim in ('There are 6 WARN lines.', '共有 6 条 WARN。',
+                      'The WARN count is 6.', '本次 WARN 条数为 6。',
+                      'There are 5 or 6 WARN lines.', 'There are 6 or 5 WARN lines.',
+                      'There are 5 or 5 WARN lines.', 'There are 6/5 WARN lines.',
+                      '共有 5 或 6 条 WARN。', '共有 6 或 5 条 WARN。',
+                      '共有 6 或者 5 条 WARN。',
+                      'The WARN count is 5 or 6.', '本次 WARN 条数为 5 或 6。',
+                      'There are maybe 5 WARN lines.', '可能有 5 条 WARN。'):
+            for citation in (excerpt, f'`{excerpt}`', f'Line 181: {excerpt}'):
+                for extra in (f'{claim} Example: {citation}', f'{citation}; {claim}',
+                              f'{citation}。{claim}',
+                              f'| Explanation | {claim} Example: {citation} |',
+                              f'> {citation}; {claim}'):
+                    with self.subTest(extra=extra):
+                        errors = fill_answer('WARN: 5\nNONE\n'+extra, 2)
+                        self.assertTrue(any(error.startswith('WARN ') for error in errors))
+                        self.assertFalse(any(error.startswith('NOTICE ') for error in errors))
+        for extra in (f'The WARN count is 5, e.g. 6 `{excerpt}`',
+                      f'说明：WARN 条数为 5，例如：6 `{excerpt}`'):
+            with self.subTest(extra=extra):
+                self.assertTrue(fill_answer('WARN: 5\nNONE\n'+extra, 2))
+
+    def test_warn_citations_and_correct_count_explanations(self):
+        excerpt = 'WARN ledger drift turn=2 n=0'
+        for citation in (excerpt, f'`{excerpt}`', f'Line 181: {excerpt}',
+                         f'| 181 | `{excerpt}` |', f'> {excerpt}',
+                         f'```text\n{excerpt}\n```'):
+            with self.subTest(citation=citation):
+                self.assertEqual(fill_answer('WARN: 5\nNONE\n'+citation, 2), [])
+                self.assertTrue(fill_answer('NONE\n'+citation, 2))
+        for claim in ('There are 5 WARN lines.', '共有 5 条 WARN。',
+                      'The WARN count is 5.', '说明：本次 WARN 条数为 5。',
+                      'The WARN count is 5 (all ledger drift).'):
+            for extra in (f'{claim} Example: `{excerpt}`', f'`{excerpt}`; {claim}',
+                          f'| Explanation | {claim} Example: `{excerpt}` |',
+                          f'> `{excerpt}`; {claim}'):
+                with self.subTest(extra=extra):
+                    self.assertEqual(fill_answer('WARN: 5\nNONE\n'+extra, 2), [])
+        for extra in (f'The WARN count is 5, e.g. `{excerpt}`',
+                      f'The WARN count is 5 (e.g. `{excerpt}`).',
+                      f'说明：本次 WARN 条数为 5，例如：“{excerpt}”',
+                      f'说明：本次 WARN 条数为 5（例如：{excerpt}）。'):
+            with self.subTest(extra=extra):
+                self.assertEqual(fill_answer('WARN: 5\nNONE\n'+extra, 2), [])
+        # Citation row numbers and the log's own turn/n values are not counts.
+        self.assertEqual(fill_answer('WARN: 5\nNONE\n'+
+                                    f'Line 181: {excerpt}; Line 188: WARN ledger drift turn=2 n=1', 2), [])
+
     def test_historic_sequence_is_not_current_answer(self):
         text = 'WARN: 8\nNONE\n历史趋势：part2→part5 的 WARN 条数为 5→6→7→8'
         self.assertEqual(fill_answer(text, 5), [])
         for extra in ('\n当前 WARN 条数：7', '\n| WARN 条数 | 7 |',
                       '\n当前答案：part2→part5 的 WARN 条数为 5→6→7→9'):
             self.assertTrue(fill_answer(text + extra, 5))
+
+    def test_warn_examples_do_not_mask_current_claims(self):
+        example = 'WARN ledger drift turn=2 n=0'
+        for extra in (f'There are 6 WARN lines. Example: {example}',
+                      f'Example: {example}; The WARN count is 6.',
+                      f'补充：6 条 WARN。样例：{example}',
+                      f'The WARN count is 6 ({example})',
+                      f'I am not sure about the WARN count. Example: {example}'):
+            self.assertTrue(fill_answer('WARN: 5\nNONE\n'+extra, 2), extra)
+        for extra in (f'There are 5 WARN lines. Example: {example}',
+                      f'Example: {example}; The WARN count is 5.',
+                      f'补充：5 条 WARN。样例：{example}',
+                      f'Line 181: {example}', f'| 181 | {example} |'):
+            self.assertEqual(fill_answer('WARN: 5\nNONE\n'+extra, 2), [], extra)
 
     def test_wrong_ambiguous_and_extra_claims(self):
         for answer in ('WARN: 15\nNONE', 'WARN: 50\nNONE', 'WARN: 05\nNONE',
@@ -131,6 +195,29 @@ class ToolEvidenceTests(unittest.TestCase):
     def parsed(self, items, turn):
         write_events(self.path, items)
         return parse_turn(self.path, turn, self.cwd, 'sid')
+
+    def test_parser_rejects_contradiction_next_to_a_log_example(self):
+        items = events(2, self.cwd, 'sid')
+        items[-1]['text'] = ('WARN: 5\nNONE\n'
+                             'There are 6 WARN lines. Example: WARN ledger drift turn=2 n=0')
+        parsed = self.parsed(items, 2)
+        self.assertEqual(parsed['evidence_errors'], [])
+        self.assertTrue(parsed['expected_read'])
+        self.assertFalse(parsed['warn_correct'])
+        self.assertTrue(parsed['notice_correct'])
+        self.assertIn('WARN contradictory supplemental count', parsed['quality_errors'])
+
+    def test_cited_warn_count_conflict_is_quality_failure(self):
+        items = events(2, self.cwd, 'sid')
+        next(x for x in items if x['type'] == 'final')['text'] = (
+            'WARN: 5\nNONE\nThere are 6 WARN lines. Example: WARN ledger drift turn=2 n=0')
+        parsed = self.parsed(items, 2)
+        self.assertEqual(parsed['evidence_errors'], [])
+        self.assertEqual(parsed['quality_errors'], ['WARN contradictory supplemental count'])
+        self.assertFalse(parsed['warn_correct'])
+        self.assertTrue(parsed['notice_correct'])
+        self.assertTrue(parsed['expected_read'])
+        self.assertEqual(len(parsed['usage']), 2)
 
     def test_real_check_redirections_and_captured_exit(self):
         out, err = self.cwd/'check_out.txt', self.cwd/'check_err.txt'
@@ -261,4 +348,100 @@ class ToolEvidenceTests(unittest.TestCase):
         for path in ('conf/settings.local.toml', 'docs/NOTES.md'):
             bad = copy.deepcopy(good);bad['texts'].pop(path)
             self.assertTrue(behavior(30, [], bad, self.initial))
+
+    def archive_snapshot(self, command='mkdir -p trash; mv part*.log trash/', cwd=None):
+        from synthetic import artifacts
+        from run import snapshot
+        cwd = cwd or self.cwd
+        artifacts(30, cwd)
+        subprocess.run(command, shell=True, cwd=cwd, check=True, timeout=15)
+        return snapshot(cwd)
+
+    def test_byte_identical_nonreading_archival_moves(self):
+        commands = ('mkdir -p trash; mv part*.log trash/',
+                    'mkdir -p ./trash && mv -- ./part*.log ./trash/',
+                    'mkdir -p trash; mv part2.log part3.log trash/',
+                    'mkdir -p trash; mv -- ./part2.log trash',
+                    'mkdir -p trash; mv part13.log ./trash/')
+        for index, command in enumerate(commands):
+            with self.subTest(command=command):
+                cwd = Path(self.tmp.name)/f'move-{index}'
+                initial = write_workspace(cwd)
+                good = self.archive_snapshot(command, cwd)
+                calls = [{'tool':'bash', 'input':{'command':command}}]
+                self.assertEqual(behavior(30, calls, good, initial), [])
+                for path, digest in initial.items():
+                    if path.startswith('part'):
+                        if path in good['files']:
+                            self.assertEqual(good['files'][path], digest)
+                        else:
+                            self.assertEqual(good['files']['trash/'+path], digest)
+
+    def test_archive_workdir_and_tool_schema_are_bounded(self):
+        good = self.archive_snapshot()
+        for workdir in ('.', './', str(self.cwd)):
+            call = {'tool':'bash', 'input':{'command':'mv part*.log trash/', 'workdir':workdir}}
+            self.assertEqual(behavior(30, [call], good, self.initial, cwd=self.cwd), [])
+        for workdir in ('..', 'trash', str(self.cwd.parent), '$PWD', None):
+            call = {'tool':'bash', 'input':{'command':'mv part*.log trash/', 'workdir':workdir}}
+            self.assertIn('forbidden part log reread', behavior(30, [call], good, self.initial, cwd=self.cwd))
+        call = {'tool':'bash', 'input':{'command':'mv part*.log trash/', 'script':'cat part2.log'}}
+        self.assertIn('forbidden part log reread', behavior(30, [call], good, self.initial))
+
+    def test_archive_exemption_requires_movement_and_exact_bytes(self):
+        good = self.archive_snapshot()
+        calls = [{'tool':'bash', 'input':{'command':'mv part*.log trash/'}}]
+        for change in ('present', 'missing', 'changed', 'nested', 'outside'):
+            bad = copy.deepcopy(good)
+            path = 'part2.log'
+            if change == 'present':
+                bad['files'][path] = self.initial[path]
+            else:
+                digest = bad['files'].pop('trash/'+path)
+                if change == 'changed':bad['files']['trash/'+path] = '0'*64
+                elif change == 'nested':bad['files']['trash/nested/'+path] = digest
+                elif change == 'outside':bad['files']['elsewhere/'+path] = digest
+            self.assertIn('forbidden part log reread', behavior(30, calls, bad, self.initial), change)
+        bad = copy.deepcopy(good)
+        bad['files']['part2.log'] = '0'*64
+        self.assertIn('protected fixture changed: part2.log', behavior(30, [], bad, self.initial))
+        for turn in (28, 29):
+            bad = behavior(turn, calls, good, self.initial)
+            self.assertTrue(bad)
+            if turn == 28:self.assertIn('turn 28 forbids all tools', bad)
+            else:self.assertIn('forbidden part log reread', bad)
+
+    def test_archive_exemption_rejects_reads_mixed_shell_and_indirection(self):
+        good = self.archive_snapshot()
+        commands = ('cat part2.log', 'read part2.log', 'grep WARN trash/part2.log',
+                    'cat part2.log; mv part*.log trash/',
+                    'mkdir -p trash; mv part*.log trash/; cat trash/part2.log',
+                    'mv part*.log trash/ && grep WARN trash/part2.log',
+                    'mv part*.log trash/ | cat', 'mv part*.log trash/ > output',
+                    'mv part*.log trash/ 2>/dev/null', 'mv part*.log trash/ < input',
+                    'sh -c "mv part*.log trash/"', 'env mv part*.log trash/',
+                    'command mv part*.log trash/', 'x=trash; mv part*.log "$x/"',
+                    'mv part*.log $(echo trash)/', 'mv part*.log `echo trash`/',
+                    'mv part*.log trash/$USER/', 'mv part*.log ~/trash/',
+                    "mv 'part*.log' trash/", 'mv part*.log trash/ # comment',
+                    'mv part*.log ../trash/', 'mv part*.log trash/nested/',
+                    'mv -t trash part*.log', 'mv -f part*.log trash/',
+                    'mv part{2,3}.log trash/', 'mv part?.log trash/',
+                    'mv part[23].log trash/', 'mv part$N.log trash/',
+                    'mv part99.log trash/', 'mv part2.log part2.log trash/',
+                    'mv part*.log part2.log trash/',
+                    'mv part*.log .env', 'mv part*.log trash/; ./check.sh',
+                    'mv part*.log trash/\ncat trash/part2.log')
+        for command in commands:
+            calls = [{'tool':'bash', 'input':{'command':command}}]
+            self.assertIn('forbidden part log reread', behavior(30, calls, good, self.initial), command)
+        for tool in ('read', 'grep', 'write'):
+            args = {'path' if tool == 'grep' else 'file_path':'trash/part2.log'}
+            self.assertIn('forbidden part log reread', behavior(30, [{'tool':tool, 'input':args}], good, self.initial))
+        calls = [{'tool':'bash', 'input':{'command':'mv part*.log trash/'}},
+                 {'tool':'read', 'input':{'file_path':'trash/part2.log'}}]
+        self.assertIn('forbidden part log reread', behavior(30, calls, good, self.initial))
+        for command, error in (('mv part*.log .env', 'forbidden .env access'),
+                               ('mv part*.log trash/; ./check.sh', 'repeated or unauditable check.sh execution')):
+            self.assertIn(error, behavior(30, [{'tool':'bash', 'input':{'command':command}}], good, self.initial))
 

@@ -397,7 +397,7 @@ def score_cell(root):
                     if sid in seen_sessions:
                         result['evidence_errors'].append('session reused across groups')
                     seen_sessions.add(sid)
-                result['quality_errors'] += behavior(turn, result['calls'], snapshot, initial)
+                result['quality_errors'] += behavior(turn, result['calls'], snapshot, initial, cwd=cwd)
                 if not result['evidence_errors']:
                     report['complete_turns'] += 1
                     gr['complete_turns'] += 1
