@@ -464,6 +464,21 @@ def score_cell(root, *, review_sources=False):
     return report
 
 
+COMPARABLE_SPEC_KEYS = ('model_family', 'model', 'route', 'host', 'dependencies', 'parameters',
+                        'cache_warmup', 'usage_semantics', 'package_sha256')
+ISOLATED_SPEC_KEYS = ('dsh_home', 'profile', 'shadow_dir')
+
+
+def spec_comparison_errors(candidate, stock):
+    """Static paired requirements, shared by preregistration and final scoring."""
+    errors = ['noncomparable ' + key for key in COMPARABLE_SPEC_KEYS
+              if candidate.get(key) != stock.get(key)]
+    for key in ISOLATED_SPEC_KEYS:
+        if candidate.get(key) == stock.get(key):
+            errors.append('shared ' + key)
+    return errors
+
+
 def compare(candidate, stock):
     """Prerecorded budgets. Never turn unmatched/historical input into release proof."""
     errors = []
@@ -474,16 +489,11 @@ def compare(candidate, stock):
             errors.append('incomplete evidence cannot be compared')
     if not (candidate['release_quality_pass'] if candidate.get('semantic_verified') else candidate['answer_pass']):
         errors.append('candidate quality failed')
-    for key in ('model_family', 'model', 'route', 'host', 'dependencies', 'parameters', 'cache_warmup', 'usage_semantics', 'package_sha256'):
-        if candidate['spec'].get(key) != stock['spec'].get(key):
-            errors.append('noncomparable ' + key)
+    errors += spec_comparison_errors(candidate['spec'], stock['spec'])
     if candidate['fingerprints'] != stock['fingerprints']:
         errors.append('different harness')
     if candidate['spec'].get('usage_semantics') != 'disjoint-input-read-write':
         errors.append('unknown usage semantics')
-    for key in ('dsh_home', 'profile', 'shadow_dir'):
-        if candidate['spec'].get(key) == stock['spec'].get(key):
-            errors.append('shared ' + key)
     for cg, sg, order in zip(candidate['groups'], stock['groups'], MANIFEST['cache']['group_order']):
         a, b = (cg, sg) if order == 'candidate,stock' else (sg, cg)
         if a['ended'] is None or b['started'] is None or a['ended'] > b['started']:

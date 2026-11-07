@@ -18,7 +18,12 @@ Create a private plan JSON array with exactly four entries:
 `{"root":"/absolute/new/run", "spec":{...exact run.py spec...}}`, one each for
 DS/candidate, DS/stock, GLM/candidate, GLM/stock. Specs, homes, profiles, routes,
 parameters and A/B then B/A group order retain the existing contract. All four
-roots must be absent at registration. Create a reviewer JSON array of 3–12 entries:
+roots must be absent at registration. Registration rejects known paired spec
+mismatches before collection, shared profiles across any cells, and overlapping
+or aliased root/home/shadow paths across cells. Each path must be canonical.
+Both arms of each family must match model, route, host, dependencies, parameters,
+warmup, usage semantics and package hash. Re-reading a registration enforces the
+same static checks. Create a reviewer JSON array of 3–12 entries:
 
 ```json
 {
@@ -166,6 +171,8 @@ All failures/missing/unresolved retain **310 turns / 230 FILL per arm**.
 Stock semantic errors are reported on the same 230 denominator and never excuse
 a candidate error. An incorrect candidate fails `semantic_collection_pass`.
 Agreeing unresolved receipts produce a failing, provisional result.
+Every submitted envelope is fully verified before partitioning by its recognized
+stage; malformed or unknown-stage extras cannot disappear from adjudication.
 
 The scorer keeps legacy `quality_errors`, `gate_pass`, heuristic correctness
 counts and standalone CLI exit behavior as **collection diagnostics**.
@@ -182,7 +189,12 @@ The standalone legacy `gate_pass` never means release approval.
 matched CLI exits nonzero without verified receipts. Only the verifier produces
 `matched_collection_pass` after semantic verification. Existing cache budgets
 **0.005, 1.05, DS 0.9823**, isolation, process, behavior and valid correlated-read
-rules are unchanged. `cache_release_pass` and overall `release_pass` stay false:
+rules are unchanged. `semantic_collection_pass` reports semantic candidate
+success only. Aggregate `paired_collection_pass` additionally requires **both**
+DS and GLM `matched_collection_pass` results; `live_collection_pass` requires
+that paired success and a live registration. Verifier CLI exit 0 requires paired
+success (including for synthetic test matrices). A semantic-only PASS cannot
+waive isolation/comparability failures. `cache_release_pass` and overall `release_pass` stay false:
 the independent holdout, 20k small-cut controls, cut/post-cut requests, retry and
 extra-request costs, runtime provenance and stock plugin absence remain separate
 release evidence. Do not treat a synthetic verification as release collection.

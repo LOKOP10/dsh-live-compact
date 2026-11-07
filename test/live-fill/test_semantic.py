@@ -3,6 +3,7 @@ import base64
 import contextlib
 import copy
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from mkfx import build_log
 from run import init_attempt, run_group
 from score import compare, parse_turn, score_cell
 from semantic import (ATTESTATION, VERSION, adjudicate, apply_verdicts, canonical,
-                      export, load, register, reviewers, sources, verify)
+                      export, load, main, policy_at, register, reviewers, sources, verify)
 from synthetic import cell, events, spec, write_events
 
 
@@ -163,6 +164,7 @@ class SemanticTests(unittest.TestCase):
     def test_full_signed_matrix_is_verified_but_never_full_release(self):
         result = verify(self.policy, self.packet, self.mapping, self.receipts)
         self.assertTrue(result['semantic_collection_pass'])
+        self.assertTrue(result['paired_collection_pass'])
         self.assertFalse(result['provisional'])
         self.assertEqual(result['mode'], 'synthetic')
         self.assertFalse(result['live_collection_pass'])
@@ -198,7 +200,8 @@ class SemanticTests(unittest.TestCase):
     def test_hard_failures_cannot_be_overridden_by_complete_correct_receipts(self):
         path = self.extra_path
         original = [json.loads(x) for x in path.read_text().splitlines()]
-        for kind in ('correlated-read', 'nonzero-tool', 'validation-quality', 'forbidden-behavior', 'malformed'):
+        for kind in ('correlated-read', 'nonzero-tool', 'validation-quality', 'forbidden-behavior',
+                     'quoted-rm', 'wrapped-rm', 'forbidden-import', 'opaque-command', 'malformed'):
             with self.subTest(kind=kind):
                 items = copy.deepcopy(original)
                 if kind == 'correlated-read':
@@ -208,8 +211,13 @@ class SemanticTests(unittest.TestCase):
                 else:
                     call = dict(type='tool_call', callId='bad', tool='bash', input={'command':'false'})
                     result = dict(type='tool_result', callId='bad', status='completed', result='[exit code: 9]')
-                    if kind == 'forbidden-behavior':
-                        call['input']['command'] = 'rm scratch'
+                    commands = {'forbidden-behavior': 'rm scratch', 'quoted-rm': '"rm" scratch',
+                                'wrapped-rm': 'sh -c "rm scratch"',
+                                'forbidden-import': 'python -c "import pandas, tenacity"',
+                                'opaque-command': 'eval "$PAYLOAD"'}
+                    if kind in commands:
+                        # Audit inert log strings only; never execute these.
+                        call['input']['command'] = commands[kind]
                         result['result'] = '[exit code: 0]'
                     elif kind == 'validation-quality':
                         call.update(tool='write', input={'file_path':'docs/NOTES.md', 'content':'x'})
@@ -321,6 +329,107 @@ class SemanticTests(unittest.TestCase):
             self.decide(case, [a, self.envelope(case, 'B'), self.sign(third)])
         unresolved = [self.envelope(case, who, ('unresolved', 'correct', 'correct')) for who in ('A', 'B')]
         self.assertEqual(self.decide(case, unresolved), ('unresolved', 'correct', 'correct'))
+
+    def test_every_extra_envelope_is_validated_before_stage_partition(self):
+        case = self.small_case()
+        initials = [self.envelope(case, who) for who in ('A', 'B')]
+        astra = {'record': {'reviewer_id': 'NOT_REGISTERED', 'stage': 'discarded'},
+                 'signature': 'invalid base64 !!!', 'ignored': True}
+        for extra in (astra, None, {}, {'record': None, 'signature': ''}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.decide(case, initials + [extra])
+        for change in ('unknown-stage', 'unknown-reviewer', 'signature', 'extra-envelope-field'):
+            third = self.envelope(case, 'C')
+            if change == 'unknown-stage':
+                third['record']['stage'] = 'discarded'
+                third = self.sign(third['record'])
+            elif change == 'unknown-reviewer':
+                third['record']['reviewer_id'] = 'NOT_REGISTERED'
+            elif change == 'signature':
+                third['record']['stage'] = 'adjudication'
+                third['signature'] = 'invalid base64 !!!'
+            else:
+                third['ignored'] = True
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.decide(case, initials + [third])
+
+    def test_registration_rejects_known_invalid_pairs_before_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            plan = [dict(root=str(base / (f + '-' + a)), spec=spec(base / (f + '-' + a), a, f))
+                    for f in ('ds', 'glm') for a in ('candidate', 'stock')]
+            for key in ('model', 'route', 'host', 'dependencies', 'parameters', 'cache_warmup',
+                        'usage_semantics', 'package_sha256', 'dsh_home', 'profile', 'shadow_dir'):
+                bad = copy.deepcopy(plan)
+                if key in ('dsh_home', 'profile', 'shadow_dir'):
+                    bad[1]['spec'][key] = bad[0]['spec'][key]
+                elif key == 'package_sha256':
+                    bad[1]['spec'][key] = '1' * 64
+                elif key in ('dependencies', 'parameters'):
+                    bad[1]['spec'][key]['different'] = True
+                else:
+                    bad[1]['spec'][key] += '-different'
+                output = base / 'must-not-exist.json'
+                with self.subTest(key=key), patch('semantic.reviewers') as keys:
+                    with self.assertRaises(ValueError):
+                        register(bad, self.registry, output, synthetic=True)
+                    keys.assert_not_called()
+                    self.assertFalse(output.exists())
+                    self.assertTrue(all(not Path(e['root']).exists() for e in bad))
+            for change in ('cross-family-home', 'cross-family-profile', 'nested', 'cross-role', 'aliased-root'):
+                bad = copy.deepcopy(plan)
+                if change == 'cross-family-home':
+                    bad[2]['spec']['dsh_home'] = bad[0]['spec']['dsh_home']
+                elif change == 'cross-family-profile':
+                    bad[2]['spec']['profile'] = bad[0]['spec']['profile']
+                elif change == 'nested':
+                    bad[2]['spec']['shadow_dir'] = bad[0]['spec']['shadow_dir'] + '/nested'
+                elif change == 'cross-role':
+                    bad[2]['spec']['dsh_home'] = bad[0]['root']
+                else:
+                    bad[2]['root'] = str(base / 'unused' / '..' / 'glm-candidate')
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    register(bad, self.registry, base / 'invalid.json', synthetic=True)
+            # Policy reads also revalidate known static failures; old files cannot bypass registration.
+            policy = read_json(self.policy)
+            policy['plan'][1]['spec']['profile'] = policy['plan'][0]['spec']['profile']
+            with self.changed(self.policy, canonical(policy)), self.assertRaisesRegex(ValueError, 'shared profile'):
+                policy_at(self.policy)
+
+    def test_live_aggregate_requires_both_comparisons_separate_from_semantics(self):
+        # Exercise the real 920-case verifier aggregation and compare(), while
+        # stubbing collection/signatures only. This is never live evidence.
+        cells = {key: dict(report=score_cell(root, review_sources=True), run_sha256=self.map_data['runs'][key])
+                 for key, root in self.roots.items()}
+        policy = dict(read_json(self.policy), mode='live')
+        for failed in (None, 'ds', 'glm'):
+            collected = copy.deepcopy(cells)
+            if failed:
+                collected[failed+'/candidate']['report']['spec']['dsh_home'] = collected[failed+'/stock']['report']['spec']['dsh_home']
+            with self.subTest(failed=failed), patch('semantic.policy_at', return_value=(policy, self.protocol_sha)), \
+                    patch('semantic.collect', return_value=collected), \
+                    patch('semantic.adjudicate', return_value=('correct',) * 3):
+                result = verify(self.policy, self.packet, self.mapping, self.receipts)
+            self.assertTrue(result['semantic_collection_pass'])
+            self.assertFalse(result['provisional'])
+            self.assertEqual(result['paired_collection_pass'], failed is None)
+            self.assertEqual(result['live_collection_pass'], failed is None)
+            self.assertFalse(result['release_pass'])
+            if failed:
+                self.assertIn('shared dsh_home', result['comparisons'][failed]['errors'])
+
+    def test_cli_cannot_exit_success_on_semantic_only_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for paired in (False, True):
+                output = Path(tmp) / (str(paired)+'.json')
+                result = dict(semantic_collection_pass=True, paired_collection_pass=paired,
+                              live_collection_pass=paired, provisional=False, release_pass=False)
+                argv = ['semantic.py', 'verify', '--registration', 'unused', '--packet', 'unused',
+                        '--mapping', 'unused', '--receipts', 'unused', '--output', str(output)]
+                with patch.object(sys, 'argv', argv), patch('semantic.verify', return_value=result), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(), 0 if paired else 1)
+                self.assertEqual(read_json(output), result)
 
     def test_wrong_candidate_stock_and_unresolved_keep_same_denominators(self):
         reports = {a: score_cell(self.roots['ds/' + a]) for a in ('candidate', 'stock')}

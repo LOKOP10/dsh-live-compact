@@ -16,7 +16,7 @@ from pathlib import Path
 from contract import (FILL, GROUPS, HERE, MANIFEST, NOTICE, ROUNDS, fingerprints,
                       read_json, sha, validate_contract, write_json)
 from mkfx import build_log
-from score import MAX_LOG_BYTES, compare, score_cell
+from score import MAX_LOG_BYTES, compare, score_cell, spec_comparison_errors
 
 VERSION = 'semantic-review-112-v1'
 MATRIX = {(family, arm) for family in ('ds', 'glm') for arm in ('candidate', 'stock')}
@@ -78,8 +78,8 @@ def reviewers(registry):
     return {r['reviewer_id']: r for r in registry}
 
 
-def register(plan, registry, output, *, synthetic=False):
-    """Run before initialization. All planned roots must be new, exact paths."""
+def validate_plan(plan, *, synthetic, new=False):
+    """Reject known static isolation/comparability failures before collection."""
     from run import validate_spec
     require(isinstance(plan, list) and len(plan) == 4, 'four planned cells required')
     identities, roots = set(), set()
@@ -87,13 +87,37 @@ def register(plan, registry, output, *, synthetic=False):
         exact(entry, 'root spec')
         spec = validate_spec(entry['spec'])
         root = Path(entry['root'])
-        require(root.is_absolute() and str(root.resolve()) == str(root) and not root.exists(),
-                'register before any planned run exists')
+        require(root.is_absolute() and str(root.resolve()) == str(root), 'canonical absolute run root required')
+        if new:
+            require(not root.exists(), 'register before any planned run exists')
         identities.add((spec['model_family'], spec['arm']))
         roots.add(str(root))
         require((spec['model'] == 'synthetic-only' and spec['route'] == 'offline-fake') == synthetic,
                 'synthetic/live provenance mismatch')
     require(identities == MATRIX and len(roots) == 4, 'exact ds/glm candidate/stock matrix required')
+    cells = {(e['spec']['model_family'], e['spec']['arm']): e['spec'] for e in plan}
+    for family in ('ds', 'glm'):
+        errors = spec_comparison_errors(cells[family, 'candidate'], cells[family, 'stock'])
+        require(not errors, 'invalid paired plan: ' + ', '.join(errors))
+    # All four cells need independent homes/profiles/shadows. Also disallow
+    # ancestor/descendant and cross-role filesystem aliases, not just equal strings.
+    paths = []
+    profiles = set()
+    for entry in plan:
+        spec = entry['spec']
+        require(spec['profile'] not in profiles, 'shared profile across cells')
+        profiles.add(spec['profile'])
+        current = [Path(entry['root']), *(Path(spec[k]) for k in ('dsh_home', 'shadow_dir'))]
+        require(all(str(p.resolve()) == str(p) for p in current), 'canonical isolated paths required')
+        for path in current:
+            require(not any(path == other or path in other.parents or other in path.parents for other in paths),
+                    'overlapping run/home/shadow paths')
+        paths.extend(current)
+
+
+def register(plan, registry, output, *, synthetic=False):
+    """Run before initialization. All planned roots must be new, exact paths."""
+    validate_plan(plan, synthetic=synthetic, new=True)
     reviewers(registry)
     policy = dict(version=VERSION, mode='synthetic' if synthetic else 'live',
                   created=time.time(), nonce=secrets.token_hex(32), fingerprints=fingerprints(),
@@ -110,9 +134,7 @@ def policy_at(path):
     require(type(policy['created']) in (int, float) and policy['created'] <= time.time(), 'registration time')
     require(policy['fingerprints'] == fingerprints(), 'stale protocol/input/code registration')
     require(policy['dimensions'] == {'turns_per_cell': 310, 'fill_per_cell': 230, 'cases': 920}, 'changed denominators')
-    require(isinstance(policy['plan'], list) and len(policy['plan']) == 4, 'four planned cells required')
-    require({(p['spec']['model_family'], p['spec']['arm']) for p in policy['plan']} == MATRIX and
-            len({p['root'] for p in policy['plan']}) == 4, 'malformed planned matrix')
+    validate_plan(policy['plan'], synthetic=policy['mode'] == 'synthetic')
     reviewers(policy['reviewers'])
     return policy, sha(bounded(path))
 
@@ -264,12 +286,15 @@ def verify_record(envelope, case, packet_sha, protocol_sha, registry, fixture):
 
 def adjudicate(records, case, packet_sha, protocol_sha, registry, fixture):
     require(isinstance(records, list) and len(records) in (2, 3), 'two reviews; third only for disagreement')
+    # Validate every submitted envelope, including extras, before partitioning.
+    # An unknown stage must never make an unverified record disappear.
+    verified = [verify_record(r, case, packet_sha, protocol_sha, registry, fixture) for r in records]
     require(len({r['record']['reviewer_id'] for r in records}) == len(records), 'reviewers must be distinct')
     initials = [r for r in records if r['record']['stage'] == 'initial']
     thirds = [r for r in records if r['record']['stage'] == 'adjudication']
     require(len(initials) == 2, 'exactly two independent initial reviews required')
     require(all(r['record']['adjudicates'] == [] for r in initials), 'initial reviews cannot reference peer opinions')
-    votes = [verify_record(r, case, packet_sha, protocol_sha, registry, fixture) for r in initials]
+    votes = [v for r, v in zip(records, verified) if r['record']['stage'] == 'initial']
     def decision(envelope, vote):
         return vote, tuple(envelope['record'][f]['observed'] for f in ('warn', 'notice'))
     decisions = [decision(r, vote) for r, vote in zip(initials, votes)]
@@ -279,7 +304,7 @@ def adjudicate(records, case, packet_sha, protocol_sha, registry, fixture):
     require(len(thirds) == 1, 'disagreement requires third distinct reviewer')
     third = thirds[0]
     require(sorted(third['record']['adjudicates']) == sorted(sha(canonical(r)) for r in initials), 'adjudication must bind both disputed records')
-    resolved = verify_record(third, case, packet_sha, protocol_sha, registry, fixture)
+    resolved = verified[records.index(third)]
     require(decision(third, resolved) in decisions and 'unresolved' not in resolved, 'unresolved adjudication')
     return resolved
 
@@ -346,8 +371,10 @@ def verify(policy_path, packet_path, mapping_path, receipts_path):
     comparisons = {f: compare(reports[f + '/candidate'], reports[f + '/stock']) for f in ('ds', 'glm')}
     resolved = all(not r['provisional'] for r in reports.values())
     passed = resolved and all(r['release_quality_pass'] for k, r in reports.items() if k.endswith('/candidate'))
+    paired = passed and all(c['matched_collection_pass'] for c in comparisons.values())
     return dict(version=VERSION, mode=policy['mode'], packet_sha256=packet_sha,
-                semantic_collection_pass=passed, live_collection_pass=passed and policy['mode'] == 'live', provisional=not resolved,
+                semantic_collection_pass=passed, paired_collection_pass=paired,
+                live_collection_pass=paired and policy['mode'] == 'live', provisional=not resolved,
                 release_pass=False, cells=reports, comparisons=comparisons,
                 remaining_release_evidence=['independent preregistered holdout', 'runtime/cache release gates'])
 
@@ -377,8 +404,8 @@ def main():
         else:
             result = verify(args.registration, args.packet, args.mapping, args.receipts)
             write_json(args.output, result)
-            print(json.dumps({k: result[k] for k in ('semantic_collection_pass', 'provisional', 'release_pass')}))
-            return 0 if result['semantic_collection_pass'] else 1
+            print(json.dumps({k: result[k] for k in ('semantic_collection_pass', 'paired_collection_pass', 'live_collection_pass', 'provisional', 'release_pass')}))
+            return 0 if result['paired_collection_pass'] else 1
         print(json.dumps(result))
         return 0
     except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, subprocess.SubprocessError):

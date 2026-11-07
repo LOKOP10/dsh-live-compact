@@ -413,6 +413,7 @@ function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}
   return { start: nodes[start], end: nodes[end], tokens, after, keptTokens, card, prefix };
 }
 
+export const BIG_GATE = DEFAULTS.bigGate;
 export { isCheckpoint, planMessages, spineCheckpointSource };
 
 // 只换「切哪一段、怎么换成卡片」。官方大门仍由宿主算。
