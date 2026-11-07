@@ -25,6 +25,11 @@ def path_errors(value, turn, write=False, listing=False):
     parts = PurePosixPath(value).parts
     if '..' in parts:
         return [OPAQUE]
+    # Descriptor aliases are not ordinary source files. Do not erase stdin
+    # provenance by treating /dev/stdin (or another live fd) as a non-CSV path.
+    if re.match(r'^/(?:dev/(?:stdin$|stdout$|stderr$|fd/)|proc/(?:self|thread-self|[0-9]+)/fd/)',
+                str(PurePosixPath(value))):
+        return [OPAQUE]
     bad = []
     if '.env' in parts:
         bad.append('forbidden .env access')
@@ -136,84 +141,120 @@ def shell_words(command):
 
 
 def shell_errors(command, turn, depth=0):
+    return shell_audit(command, turn, depth)[0]
+
+
+def shell_audit(command, turn, depth=0, stdin_paths=None):
+    # None means opaque input; an empty set is proven literal/status output.
+    # Only a pipe carries a producer's sources to the next command.
     if not isinstance(command, str) or not command.strip() or len(command) > 65536 or depth > 4:
-        return [OPAQUE]
+        return [OPAQUE], None
     try:
         words = shell_words(command)
     except ValueError:
-        return [OPAQUE]
+        return [OPAQUE], None
     separators = {';', '&', '&&', '||', '|', '\n'}
     redirects = {'>', '>>', '<', '>&'}
     if not words or all(w in separators for w in words):
-        return [OPAQUE]
-    bad, segment = [], []
+        return [OPAQUE], None
+    bad, segment, output, shell_output = [], [], None, set()
+    incoming = stdin_paths
     for word in words + [';']:
         if word in separators:
             if segment:
-                bad += simple_errors(segment, turn, depth)
+                errors, output = simple_audit(segment, turn, depth, incoming)
+                bad += errors
                 segment = []
+            elif word == '|':
+                bad.append(OPAQUE)
+                output = None
+            if word != '|':
+                shell_output = (shell_output | output) if shell_output is not None and output is not None else None
+            incoming = output if word == '|' else stdin_paths
         else:
             if word and all(c in ';&|<>\n' for c in word) and word not in redirects:
-                return [OPAQUE]
+                return bad + [OPAQUE], None
             segment.append(word)
-    return bad
+    return bad, shell_output
 
 
-def simple_errors(words, turn, depth):
+def simple_audit(words, turn, depth, stdin_paths=None):
     head, *args = words
     name = PurePosixPath(head).name
-    if name == 'rm':
-        return ['forbidden rm command']
-    if turn >= 19 and name in ('make', 'gmake'):
-        return ['forbidden Makefile use']
-    if '/' in head and str(PurePosixPath(head).parent) not in ('/bin', '/usr/bin', '/usr/local/bin'):
-        return [OPAQUE]
-    if name in ('env', 'command', 'exec'):
-        rest = args[1:] if args[:1] == ['--'] else args
-        return simple_errors(rest, turn, depth + 1) if rest and depth < 4 else [OPAQUE]
-    if name in ('sh', 'bash', 'dash', 'zsh'):
-        return shell_errors(args[1], turn, depth + 1) if len(args) == 2 and args[0] in ('-c', '-lc') else [OPAQUE]
-    if name in ('python', 'python3'):
-        return python_errors(args[1], turn) if len(args) == 2 and args[0] == '-c' else [OPAQUE]
     bad, operands = [], []
+    redirected_output = False
     while args:
         token = args.pop(0)
         if token in ('>', '>>', '<', '>&'):
             if not args:
-                return bad + [OPAQUE]
+                return bad + [OPAQUE], None
             target = args.pop(0)
             if token == '>&':
                 if target not in ('1', '2'):
                     bad.append(OPAQUE)
             else:
                 bad += path_errors(target, turn, write=token != '<')
+                if token == '<':
+                    stdin_paths = {target}
+                else:
+                    redirected_output = True
                 if token != '<' and target.endswith(('.py', '.sh')):
                     bad.append(OPAQUE)
-        elif token in ('1', '2') and args and args[0] in ('>', '>>', '>&'):
+        elif token in ('0', '1', '2') and args and args[0] in ('>', '>>', '>&', '<'):
+            if (token == '0') != (args[0] == '<'):
+                bad.append(OPAQUE)
             continue
         else:
             operands.append(token)
+
+    def finish(errors=(), sources=None):
+        return bad + list(errors), None if redirected_output else sources
+
+    if name == 'rm':
+        return finish(['forbidden rm command'])
+    if turn >= 19 and name in ('make', 'gmake'):
+        return finish(['forbidden Makefile use'])
+    if '/' in head and str(PurePosixPath(head).parent) not in ('/bin', '/usr/bin'):
+        return finish([OPAQUE])
+    if name in ('env', 'command', 'exec'):
+        rest = operands[1:] if operands[:1] == ['--'] else operands
+        errors, sources = simple_audit(rest, turn, depth + 1, stdin_paths) if rest and depth < 4 else ([OPAQUE], None)
+        return finish(errors, sources)
+    if name in ('sh', 'bash', 'dash', 'zsh'):
+        errors, sources = shell_audit(operands[1], turn, depth + 1, stdin_paths) if len(operands) == 2 and operands[0] in ('-c', '-lc') else ([OPAQUE], None)
+        return finish(errors, sources)
+    if name in ('python', 'python3'):
+        return finish(python_errors(operands[1], turn) if len(operands) == 2 and operands[0] == '-c' else [OPAQUE])
+    if name == 'printf':
+        output = operands[1:] if operands[:1] == ['--'] else operands
+        # Bash printf -v and %n assign shell variables, including PATH. Admit
+        # only output formats; option-looking data after the format is literal.
+        if not output or (operands[:1] != ['--'] and output[0].startswith('-')):
+            return finish([OPAQUE])
+        fmt = output[0].replace(STATUS, '0')
+        if '%' in re.sub(r'%%|%[-+ #0]*\d*(?:\.\d+)?[sbcdiuoxXfFeEgGaAq]', '', fmt):
+            return finish([OPAQUE])
+        return finish(sources=set())
     if any(STATUS in word for word in words):
-        # Only echo "identifier=$?" is an active expansion. Never let this
-        # token become an interpreter program, filename, option or command.
-        return bad + ([] if name == 'echo' and len(words) == 2 and
-                      re.fullmatch(r'[a-zA-Z_][a-zA-Z_0-9]*='+re.escape(STATUS), operands[0]) else [OPAQUE])
-    if name in ('echo', 'printf', 'true', 'false', 'pwd'):
-        return bad
+        # Status is data only: never an interpreter program, path or option.
+        return finish([] if name == 'echo' and len(operands) == 1 and
+                      re.fullmatch(r'[a-zA-Z_][a-zA-Z_0-9]*='+re.escape(STATUS), operands[0]) else [OPAQUE], set())
+    if name in ('echo', 'true', 'false', 'pwd'):
+        return finish(sources=set())
     if name == 'awk':
         # One literal field projection; no options, assignments, code or output.
         if (not operands or not re.fullmatch(r'\{[ \t]*print[ \t]+\$1[ \t]*\}', operands[0]) or
                 any(p.startswith('-') or '=' in p for p in operands[1:])):
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
         operands = operands[1:]
     elif name in ('sort', 'uniq'):
         flags = {'sort': {'-n', '-r', '-rn', '-nr', '--'}, 'uniq': {'-c', '--'}}[name]
         if any(p.startswith('-') and p not in flags for p in operands):
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
         operands = [p for p in operands if p not in flags]
         # uniq's second operand is an output FILE, unlike sort's inputs.
         if name == 'uniq' and len(operands) > 1:
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
     elif name == 'sed':
         # sed can execute shell commands and write files. Admit only print scripts.
         scripts = [a for a in operands if not a.startswith('-')]
@@ -221,31 +262,34 @@ def simple_errors(words, turn, depth):
                 operands.count('-e') > 1 or not scripts or
                 any(a.startswith('-') for a in operands[operands.index(scripts[0])+1:]) or
                 not re.fullmatch(r'(?:\d+(?:,\d+|,\$)?|\$|/[^/\n]+/)p', scripts[0])):
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
         operands = scripts[1:]
     elif name in ('grep', 'rg'):
         # No recursive/default directory scans or external pattern files.
         flags = {'-n', '-c', '-F', '-E', '-i', '-v', '-h', '-H', '-l', '-o', '-q', '-s', '--',
                  '--no-heading', '--line-number', '--count', '--fixed-strings', '--ignore-case'}
         if any(a.startswith('-') and a not in flags and not re.fullmatch(r'-[ncFEivhHloqs]+', a) for a in operands):
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
         operands = [a for a in operands if a not in flags and not re.fullmatch(r'-[ncFEivhHloqs]+', a)]
         if not operands:
-            return bad + [OPAQUE]
+            return finish([OPAQUE])
         operands = operands[1:]  # literal pattern is data, not a path/program
-        if name == 'rg' and not operands:
-            bad.append(OPAQUE)
-        if name == 'rg' and any(not PurePosixPath(p).suffix for p in operands):
+        if name == 'rg' and any(p != '-' and not PurePosixPath(p).suffix for p in operands):
             bad.append(OPAQUE)  # rg recurses on directories, unlike plain grep.
     elif name not in READERS | {'mkdir', 'mv', 'cp', 'touch'}:
-        return bad + [OPAQUE]
+        return finish([OPAQUE])
     if name in READERS:
-        if name in ('grep', 'rg', 'sed', 'awk') and turn >= 7 and any(p.endswith('.csv') for p in operands):
+        sources = {p for p in operands if not p.startswith('-') and not p.isdigit()}
+        if name != 'ls' and (not sources or '-' in operands):
+            if stdin_paths is None:
+                return finish([OPAQUE])
+            sources |= stdin_paths
+        if name in ('grep', 'rg', 'sed', 'awk') and turn >= 7 and any(p.lower().endswith('.csv') for p in sources):
             bad.append('unauditable CSV regex/split parsing')
         for path in operands:
             if not path.startswith('-') and not path.isdigit():
                 bad += path_errors(path, turn)
-        return bad
+        return finish(sources=set() if name == 'ls' else sources)
     flags = {'mkdir': {'-p', '--'}, 'mv': {'--'}, 'cp': {'--'}, 'touch': {'--'}}
     if any(p.startswith('-') and p not in flags[name] for p in operands):
         bad.append(OPAQUE)
@@ -255,7 +299,9 @@ def simple_errors(words, turn, depth):
             bad += path_errors(path, turn, write=True)
             if path.endswith(('.py', '.sh')):
                 bad.append(OPAQUE)  # Cannot audit code copied from an opaque source.
-    return bad
+    if name in ('cp', 'mv'):
+        bad.append(OPAQUE)  # File suffixes cannot prove a copy/move is non-executable.
+    return finish()
 
 
 def bash_input_errors(args, cwd=None):

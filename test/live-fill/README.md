@@ -186,8 +186,13 @@ the literal awk program `{print $1}` (with optional horizontal whitespace),
 sort with only `-n`/`-r`/`-rn`/`-nr`, and uniq with optional `-c` have bounded
 support. Uniq accepts at most one input filename: its second filename writes
 output and is rejected. Awk options, assignments, other programs and CSV parsing
-receive no exception. The sole new active expansion is `echo "identifier=$?"`
-as a complete two-word command; other variable/substitution forms still fail.
+receive no exception. Simple input redirections and pipes carry audited source
+paths into consumers, so CSV filters still fail through stdin; unknown stdin
+remains opaque. Literal/status printf output is supported, but assignment/control
+forms (`-v`, `%n`) fail. Status expansion is limited to output-only printf and
+`echo "identifier=$?"`; other variable/substitution forms still fail. Copies and
+moves with unproven executable identity remain opaque outside the verified
+archive exception, as does command resolution outside trusted system paths.
 Read-only standard-library Python/CSV and structured read/grep/write/edit remain
 supported. Bash accepts optional nonblank string `description` as UI metadata
 only; it grants no execution permission. Unknown or unsupported input keys fail.

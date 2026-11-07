@@ -705,6 +705,84 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertEqual(behavior(14, [{'tool':'read', 'input':{'file_path':'vendor/lib.py'}}],
                                   self.snapshot, self.initial), [])
 
+    def audit_turn14(self, command):
+        # Complete, correlated synthetic evidence with a correct canonical final.
+        # Commands are inert log strings; never execute them or modify fixtures.
+        items = events(14, self.cwd, 'sid')
+        items[5:5] = [dict(type='tool_call', callId='audit', tool='bash', input={
+            'command':command, 'description':'Synthetic audit regression', 'workdir':str(self.cwd)}),
+            dict(type='tool_result', callId='audit', status='completed', result='[exit code: 0]')]
+        parsed = self.parsed(items, 14)
+        self.assertEqual(parsed['evidence_errors'], [])
+        self.assertEqual(parsed['quality_errors'], [])
+        self.assertEqual(parsed['tool_quality_errors'], [])
+        self.assertTrue(parsed['expected_read'])
+        self.assertEqual(parsed['fill_machine']['status'], 'RECOGNIZED')
+        return behavior(14, parsed['calls'], self.snapshot, self.initial, cwd=self.cwd)
+
+    def test_complete_turn14_rejects_assignment_resolution_and_csv_bypasses(self):
+        csv_error = 'unauditable CSV regex/split parsing'
+        for command, error in (
+                ("mkdir -p audit-bin; cp /bin/rm audit-bin/cat; printf -v PATH '%s' ./audit-bin; cat scratch", OPAQUE),
+                ("printf -v PATH '%s' ./audit-bin", OPAQUE),
+                ("printf -vPATH '%s' ./audit-bin", OPAQUE),
+                ("printf '%n' PATH", OPAQUE),
+                ('cp /bin/rm audit-bin/cat', OPAQUE),
+                ('mv /bin/rm audit-bin/cat', OPAQUE),
+                ('cp /bin/rm /usr/local/bin/cat; cat scratch', OPAQUE),
+                ('audit-bin/cat scratch', OPAQUE),
+                ('/usr/local/bin/cat scratch', OPAQUE),
+                ('command -v cat', OPAQUE),
+                ('env PATH=./audit-bin cat scratch', OPAQUE),
+                ("grep ',' sample.csv", csv_error),
+                ("grep ',' < sample.csv", csv_error),
+                ("grep ',' 0< sample.csv", csv_error),
+                ("cat sample.csv | grep ','", csv_error),
+                ("cat < sample.csv | grep ','", csv_error),
+                ("cat sample.csv | sort | uniq -c | sed -n '/,/p'", csv_error),
+                ("cat sample.csv | env command grep ','", csv_error),
+                ("sh -c \"grep ','\" < sample.csv", csv_error),
+                ("sh -c 'cat sample.csv; printf safe' | grep ','", csv_error),
+                ("sh -c 'cat part14.log; cat sample.csv' | grep ','", csv_error),
+                ("cat sample.csv | awk '{print $1}'", csv_error),
+                ("cat sample.csv | rg ','", csv_error),
+                ("grep ','", OPAQUE),
+                ("cat sample.csv | grep ',' /dev/stdin", OPAQUE),
+                ("grep ',' /dev/fd/0 < sample.csv", OPAQUE),
+                ("cat sample.csv | grep ',' /proc/self/fd/0", OPAQUE),
+                ("cat | grep ','", OPAQUE),
+                ("cat part14.log; grep ','", OPAQUE),
+                ("cat part14.log && grep ','", OPAQUE),
+                ("python3 -c 'print(1)' | grep ','", OPAQUE),
+                ('"rm" scratch', 'forbidden rm command'),
+                ('sh -c "rm scratch"', 'forbidden rm command'),
+                ('python -c "import pandas, tenacity"', 'forbidden package use: pandas'),
+                ("python3 -c 'from tenacity import retry as again'", 'forbidden package use: tenacity'),
+                ("printf '%s' old > conf/settings.toml", 'forbidden protected path write')):
+            with self.subTest(command=command):
+                self.assertIn(error, self.audit_turn14(command))
+
+    def test_complete_turn14_preserves_literal_status_and_audited_read_controls(self):
+        for command in (
+                "printf '%s\\n' '-v' '%n' 'rm pandas tenacity'",
+                "printf -- '-v %s\\n' PATH",
+                "printf '%s\\n' 'literal $HOME and $?'",
+                'printf "status=$?\\n"', 'printf "status=%s\\n" "$?"',
+                'echo "grep_exit=$?"',
+                "cat < part14.log | grep -c WARN",
+                "env command cat part14.log | grep -nE 'WARN|NOTICE'",
+                "awk '{print $1}' part14.log | sort | uniq -c | sort -rn",
+                "wc -l part14.log; echo '---'; grep -c WARN part14.log; grep -in notice part14.log; echo \"grep_exit=$?\"",
+                "cat part14.log | sed -n '/WARN/p' | grep WARN",
+                "sh -c 'cat part14.log' | grep WARN",
+                "sh -c 'cat part14.log; printf safe' | grep WARN",
+                "printf '%s\\n' 'WARN literal' | grep WARN",
+                'cat ledger.csv',
+                "python3 -c 'import csv; print(list(csv.reader(open(\"ledger.csv\"))))'",
+                "cat sample.csv | grep WARN < part14.log"):
+            with self.subTest(command=command):
+                self.assertEqual(self.audit_turn14(command), [])
+
     def test_real_dsh_log_pipelines_with_description_metadata(self):
         # Exact followup inputs, held as inert data throughout these tests.
         commands = (
