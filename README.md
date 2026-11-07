@@ -14,13 +14,13 @@
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.1
+dsh plugin --profile headless add dsh-live-compact@1.1.2
 ```
 
-网页和桌面端（共用 web profile，装一次两边都生效）：
+网页端：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.1.1
+dsh plugin --profile web add dsh-live-compact@1.1.2
 ```
 
 想先装到本机看版本：
@@ -30,7 +30,14 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-## 1.1.2 Windows ACL 修正（候选，待原生复测）
+## 1.1.2
+
+- 常用压缩参数可以在 DSH 插件设置里改，保留原有环境变量用法。
+- 专用备份目录确认只有一个插件进程使用时，低于用量水线可以跳过全目录扫描。默认目录和共享目录继续按原规则检查、清理。
+- 重启后会核验已有备份和游标，再从最近的工作位置继续。
+- Windows 会重新设置备份访问权限，失败时停止写备份并保留原工具输出。
+
+### Windows 备份权限
 
 Windows 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM / Server 2022 x64）确认：1.1.1 的 `/inheritance:r /grant:r` 会留下其他主体的显式 ACE，第二个普通用户仍能读取备份。下面的修正还没有原生 Windows PASS，发布须等协调者的双用户复测。
 
@@ -40,7 +47,7 @@ Windows 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM 
 
 缓存信任同一用户和管理员不在进程运行期间原地改写 ACL；元数据核对不能发现同一文件上的 ACL 原地变更，也不能消除同用户/管理员并发改路径的全部竞态。SystemRoot/windir 必须指向可信 Windows 安装；文件系统须提供稳定文件身份并支持 Windows DACL，工具缺失或策略禁止运行时拒绝备份。Unix 仍使用目录 0700 / 文件 0600。切点、token/cap 策略、#27 根目录协调与重启口径不变。
 
-离线门禁包含 `node test/p0-gate.mjs`、`node --test test/windows-acl.test.mjs test/issue-20.mjs test/issue-27.mjs`（也加入 `npm run test:gate`）。这些 mock/结构检查不执行 Windows ACL API，不能证明另一个用户被拒绝。发布前须由协调者在上述两个 Windows 平台以两个独立、medium-integrity 非管理员账户验证：独立正向控制可读；预置 Everyone 显式可继承 RX 后，新建备份仍只有写者可读；预置显式宽松 ACE 的旧文件在父目录已缓存时被单独修正；核验目录和单独修正文件的保护位/完整 allowlist、新建文件实际继承的 allowlist、文件无 OI/CI、owner/SACL 未变，以及失败拒绝/清理。全部通过后才可发布。本独立补丁不改版本号。
+离线门禁用 `npm run test:gate`。其中 Windows 权限测试用注入的文件系统和命令验证失败分支。真实权限另用两个 Windows 普通账户验证，分别检查写入、可读的对照文件和备份的读取结果。评分器的离线测试用 `npm run test:live-gate`。
 
 ## 1.1.1
 
@@ -286,8 +293,8 @@ GLM 5.3 Flash 用了同一个插件、同一套题。有 7 组填日志达到 23
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.1
-dsh plugin --profile web add dsh-live-compact@1.1.1
+dsh plugin --profile headless add dsh-live-compact@1.1.2
+dsh plugin --profile web add dsh-live-compact@1.1.2
 ```
 
 想先装到本机看版本：
@@ -297,7 +304,7 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.1.0 的旧链接仍在。
+旧版 1.1.1 的国内镜像安装命令：
 
 ```sh
 dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.1.tgz
