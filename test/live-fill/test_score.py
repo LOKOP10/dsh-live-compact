@@ -9,7 +9,7 @@ from pathlib import Path
 from contract import HERE, FILL, MANIFEST, read_json, sha, validate_contract
 from mkfx import build_log, write_workspace
 from rubric import fill_answer, fields, behavior
-from score import compare, parse_turn, score_cell, ratios
+from score import compare, normalize_usage, parse_turn, score_cell, ratios
 from synthetic import RECALL, HIDDEN, STATUS, cell, events, write_events
 
 
@@ -61,6 +61,175 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(result['cacheWriteTokens'], 100)
         data[0].pop('cacheWriteTokens')
         self.assertIsNone(ratios(data)['actual_prompt_read_ratio'])
+
+
+class UsageNormalizationTests(unittest.TestCase):
+    def test_one_or_both_omitted_zero_buckets(self):
+        cases = [
+            (dict(inputTokens=10, outputTokens=3, totalTokens=13),
+             ('cacheReadTokens', 'cacheWriteTokens')),
+            (dict(inputTokens=10, outputTokens=3, cacheReadTokens=90, totalTokens=103),
+             ('cacheWriteTokens',)),
+            (dict(inputTokens=10, outputTokens=3, cacheWriteTokens=7, totalTokens=20),
+             ('cacheReadTokens',)),
+            (dict(inputTokens=0, outputTokens=0, totalTokens=0),
+             ('cacheReadTokens', 'cacheWriteTokens'))]
+        for raw, omitted in cases:
+            with self.subTest(raw=raw):
+                before = copy.deepcopy(raw)
+                normalized, proof = normalize_usage(raw)
+                self.assertEqual(proof, omitted)
+                self.assertEqual(normalized, dict(raw, **{k: 0 for k in omitted}))
+                self.assertEqual(raw, before)
+                self.assertIsNot(normalized, raw)
+
+    def test_positive_residual_never_infers_positive_or_zero(self):
+        for known in ({}, {'cacheReadTokens': 90}, {'cacheWriteTokens': 7}):
+            raw = dict(inputTokens=10, outputTokens=3, **known)
+            raw['totalTokens'] = sum(raw.values()) + 1
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_usage(raw), (raw, ()))
+                result = ratios([raw])
+                self.assertIsNone(result['actual_prompt_read_ratio'])
+                for key in ('cacheReadTokens', 'cacheWriteTokens'):
+                    if key not in raw:
+                        self.assertIsNone(result[key])
+                        self.assertEqual(result['usage_normalization']['unknown_fields'][key], 1)
+                self.assertEqual(result['usage_normalization']['proven_zero_steps'], 0)
+
+    def test_missing_total_leaves_omissions_unknown(self):
+        for known in ({}, {'cacheReadTokens': 90}, {'cacheWriteTokens': 7}):
+            raw = dict(inputTokens=10, outputTokens=3, **known)
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_usage(raw), (raw, ()))
+                result = ratios([raw])
+                self.assertIsNone(result['actual_prompt_read_ratio'])
+                self.assertEqual(result['usage_normalization']['proven_zero_steps'], 0)
+
+    def test_negative_residual_and_inconsistent_explicit_totals_fail(self):
+        for known in ({}, {'cacheReadTokens': 90}, {'cacheWriteTokens': 7},
+                      {'cacheReadTokens': 90, 'cacheWriteTokens': 7}):
+            raw = dict(inputTokens=10, outputTokens=3, **known)
+            raw['totalTokens'] = sum(raw.values()) - 1
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(ValueError, 'inconsistent totalTokens'):
+                    ratios([raw])
+        for delta in (-1, 1):
+            raw = dict(inputTokens=10, outputTokens=3, cacheReadTokens=90,
+                       cacheWriteTokens=7, totalTokens=110 + delta)
+            with self.assertRaisesRegex(ValueError, 'inconsistent totalTokens'):
+                normalize_usage(raw)
+
+    def test_all_known_counters_must_be_nonnegative_integers(self):
+        for key in ('inputTokens', 'outputTokens', 'cacheReadTokens',
+                    'cacheWriteTokens', 'totalTokens', 'reasoningTokens'):
+            for invalid in (-1, 1.5, True, False, None, '0'):
+                with self.subTest(key=key, invalid=invalid):
+                    raw = dict(inputTokens=10, outputTokens=3, totalTokens=13)
+                    raw[key] = invalid
+                    with self.assertRaises(ValueError):
+                        normalize_usage(raw)
+        for raw in (None, [], {}, {'inputTokens': 10}, {'outputTokens': 3}):
+            with self.assertRaises(ValueError):
+                normalize_usage(raw)
+
+    def test_explicit_nonzero_counters_and_ratios_are_preserved(self):
+        raw = dict(inputTokens=10, outputTokens=3, cacheReadTokens=90,
+                   cacheWriteTokens=7, totalTokens=110, reasoningTokens=2)
+        self.assertEqual(normalize_usage(raw), (raw, ()))
+        result = ratios([raw])
+        self.assertEqual(result['read_over_read_plus_input'], .9)
+        self.assertEqual(result['actual_prompt_read_ratio'], 90/107)
+        self.assertEqual(result['cacheWriteTokens'], 7)
+        self.assertEqual(result['usage_normalization']['proven_zero_steps'], 0)
+        raw.pop('totalTokens')
+        self.assertEqual(ratios([raw])['actual_prompt_read_ratio'], 90/107)
+
+    def test_reasoning_is_already_in_output(self):
+        raw = dict(inputTokens=10, outputTokens=3, reasoningTokens=2, totalTokens=13)
+        self.assertEqual(normalize_usage(raw)[1], ('cacheReadTokens', 'cacheWriteTokens'))
+        raw['totalTokens'] += 2
+        self.assertEqual(normalize_usage(raw)[1], ())
+
+    def test_weighted_metrics_and_separate_proof_counts(self):
+        data = [dict(inputTokens=10, outputTokens=2, cacheReadTokens=90, totalTokens=102),
+                dict(inputTokens=8, outputTokens=2, totalTokens=10),
+                dict(inputTokens=2, outputTokens=0, cacheReadTokens=0, cacheWriteTokens=3, totalTokens=5)]
+        before = copy.deepcopy(data)
+        result = ratios(data)
+        self.assertEqual(data, before)
+        self.assertEqual(result['read_over_read_plus_input'], 90/110)
+        self.assertEqual(result['actual_prompt_read_ratio'], 90/113)
+        self.assertEqual(result['usage_normalization'], dict(
+            proven_zero_steps=2,
+            proven_zero_fields=dict(cacheReadTokens=1, cacheWriteTokens=2),
+            explicit_fields=dict(cacheReadTokens=2, cacheWriteTokens=1),
+            unknown_fields=dict(cacheReadTokens=0, cacheWriteTokens=0)))
+        data.append(dict(inputTokens=1, outputTokens=1, totalTokens=3))
+        result = ratios(data)
+        self.assertIsNone(result['cacheReadTokens'])
+        self.assertIsNone(result['cacheWriteTokens'])
+        self.assertIsNone(result['read_over_read_plus_input'])
+        self.assertIsNone(result['actual_prompt_read_ratio'])
+        self.assertEqual(result['usage_normalization']['proven_zero_steps'], 2)
+        self.assertEqual(result['usage_normalization']['unknown_fields'],
+                         dict(cacheReadTokens=1, cacheWriteTokens=1))
+
+    def test_empty_metrics_do_not_invent_evidence(self):
+        result = ratios([])
+        self.assertEqual(result['steps'], 0)
+        self.assertIsNone(result['cacheReadTokens'])
+        self.assertIsNone(result['actual_prompt_read_ratio'])
+        self.assertEqual(result['usage_normalization']['proven_zero_steps'], 0)
+
+    def parse_usage(self, usage, answer=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd, path = Path(tmp)/'work', Path(tmp)/'turn.jsonl'
+            items = events(2, cwd, 'sid')
+            for ev in items:
+                if ev.get('phase') == 'step_end':
+                    ev['usage'] = copy.deepcopy(usage)
+            if answer is not None:
+                items[-1]['text'] = answer
+            write_events(path, items)
+            original = path.read_bytes()
+            result = parse_turn(path, 2, cwd, 'sid')
+            self.assertEqual(path.read_bytes(), original)
+            return result
+
+    def test_parser_logs_proofs_without_rewriting_raw_usage(self):
+        usage = dict(inputTokens=10, outputTokens=3, totalTokens=13)
+        result = self.parse_usage(usage)
+        self.assertEqual(result['evidence_errors'], [])
+        self.assertEqual(result['usage'], [usage, usage])
+        self.assertEqual(result['first_step_usage'], usage)
+        self.assertEqual(result['last_step_usage'], usage)
+        self.assertEqual(result['usage_zero_proofs'], [dict(
+            step=step, fields=['cacheReadTokens', 'cacheWriteTokens'],
+            totalTokens=13, knownTokens=13, residual=0) for step in (1, 2)])
+
+    def test_parser_keeps_unresolved_omissions_unknown(self):
+        for usage in (dict(inputTokens=10, outputTokens=3),
+                      dict(inputTokens=10, outputTokens=3, totalTokens=14)):
+            result = self.parse_usage(usage)
+            self.assertEqual(result['evidence_errors'], [])
+            self.assertEqual(result['usage_zero_proofs'], [])
+            self.assertIsNone(ratios(result['usage'])['actual_prompt_read_ratio'])
+
+    def test_parser_rejects_inconsistent_totals_with_omissions(self):
+        for usage in (dict(inputTokens=10, outputTokens=3, totalTokens=12),
+                      dict(inputTokens=10, outputTokens=3, totalTokens=-1),
+                      dict(inputTokens=10, outputTokens=3, cacheReadTokens=90,
+                           cacheWriteTokens=7, totalTokens=111)):
+            with self.assertRaises(ValueError):
+                self.parse_usage(usage)
+
+    def test_proven_zeros_cannot_excuse_wrong_answers(self):
+        result = self.parse_usage(dict(inputTokens=10, outputTokens=3, totalTokens=13),
+                                  answer='WARN: 15\nNONE')
+        self.assertEqual(result['evidence_errors'], [])
+        self.assertTrue(result['usage_zero_proofs'])
+        self.assertTrue(result['quality_errors'])
 
 
 class ParserTests(unittest.TestCase):
@@ -483,6 +652,84 @@ class FullCellTests(unittest.TestCase):
         self.assertFalse(compare(bad,b)['cache_comparison_pass'])
         bad=copy.deepcopy(b);bad['evidence_pass']=False
         self.assertFalse(compare(a,bad)['cache_comparison_pass'])
+
+    @contextlib.contextmanager
+    def changed_usage(self, root, usage):
+        # Rewrite synthetic test evidence only, including its integrity records.
+        path = root/'runs/spine-1/t2.jsonl'
+        items = [json.loads(x) for x in path.read_text().splitlines()]
+        for ev in items:
+            if ev.get('phase') == 'step_end':
+                ev['usage'] = copy.deepcopy(usage)
+        data = ''.join(json.dumps(x)+'\n' for x in items).encode()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self.changed(path, data))
+            for suffix in ('.meta.json', '.process.json'):
+                target = path.with_suffix(suffix)
+                meta = read_json(target)
+                meta['stdout_sha256'] = sha(data)
+                stack.enter_context(self.changed(target, json.dumps(meta).encode()))
+            yield
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_proven_zero_metrics_are_comparable_to_explicit_zeros(self):
+        omitted = dict(inputTokens=10, outputTokens=8, cacheReadTokens=990, totalTokens=1008)
+        explicit = dict(omitted, cacheWriteTokens=0)
+        with self.changed_usage(self.root, omitted), self.changed_usage(self.stock, explicit):
+            a, b = score_cell(self.root), score_cell(self.stock)
+            self.assertTrue(a['gate_pass'])
+            self.assertEqual(a['first_step']['usage_normalization']['proven_zero_steps'], 1)
+            self.assertEqual(a['all_steps']['usage_normalization']['proven_zero_steps'], 2)
+            self.assertEqual(b['all_steps']['usage_normalization']['proven_zero_steps'], 0)
+            self.assertEqual(a['usage_zero_proofs'], [dict(
+                group=1, turn=2, step=step, fields=['cacheWriteTokens'],
+                totalTokens=1008, knownTokens=1008, residual=0) for step in (1, 2)])
+            for section in ('first_step', 'all_steps'):
+                for key in ('read_over_read_plus_input', 'actual_prompt_read_ratio'):
+                    self.assertEqual(a[section][key], b[section][key])
+            report = compare(a, b)
+            self.assertTrue(report['cache_comparison_pass'], report['errors'])
+            self.assertFalse(report['cache_release_pass'])
+            self.assertEqual(report['usage_metrics']['candidate']['all_steps'], a['all_steps'])
+            self.assertEqual(report['usage_metrics']['stock']['all_steps'], b['all_steps'])
+
+    def test_unresolved_omissions_block_comparison(self):
+        cases = [dict(inputTokens=10, outputTokens=8, cacheReadTokens=990),
+                 dict(inputTokens=10, outputTokens=8, cacheReadTokens=990, totalTokens=1009),
+                 dict(inputTokens=10, outputTokens=8, cacheWriteTokens=0, totalTokens=19)]
+        for usage in cases:
+            with self.subTest(usage=usage), self.changed_usage(self.root, usage):
+                a, b = score_cell(self.root), score_cell(self.stock)
+                self.assertTrue(a['evidence_pass'])
+                self.assertEqual(a['usage_zero_proofs'], [])
+                self.assertIsNone(a['all_steps']['actual_prompt_read_ratio'])
+                self.assertFalse(compare(a, b)['cache_comparison_pass'])
+
+    def test_inconsistent_usage_fails_fixed_denominator_evidence(self):
+        usage = dict(inputTokens=10, outputTokens=8, totalTokens=17)
+        with self.changed_usage(self.root, usage):
+            a, b = score_cell(self.root), score_cell(self.stock)
+            self.assertFalse(a['evidence_pass'])
+            self.assertTrue(a['metrics_partial'])
+            self.assertEqual((a['complete_turns'], a['planned_turns'], a['planned_fill']), (309, 310, 230))
+            self.assertFalse(compare(a, b)['cache_comparison_pass'])
+
+    def test_proven_zero_comparison_still_requires_correctness(self):
+        usage = dict(inputTokens=10, outputTokens=8, cacheReadTokens=990, totalTokens=1008)
+        with self.changed_usage(self.root, usage), self.bad_answer(self.root):
+            a, b = score_cell(self.root), score_cell(self.stock)
+            self.assertTrue(a['evidence_pass'])
+            self.assertEqual(a['fill_correct'], 229)
+            self.assertFalse(a['gate_pass'])
+            self.assertIn('candidate quality failed', compare(a, b)['errors'])
+
+    def test_scoring_requires_verified_disjoint_usage_contract(self):
+        path = self.root/'attempt.json'
+        run = read_json(path)
+        run['spec']['usage_semantics'] = 'unknown'
+        with self.changed(path, json.dumps(run).encode()):
+            with self.assertRaisesRegex(ValueError, 'unverified usage semantics'):
+                score_cell(self.root)
 
 
 # Filled from original d9391c5 generator, excluding its leaked truth.json.

@@ -189,6 +189,16 @@ Read-only inspection on this implementation host verified installed
   `0c63a09e4b80ec22db256eac4ecab6f7de3a342e16ec590348a40c5f356eff1a`
 - `dsh-llm/lib/types/types.d.ts` SHA256
   `6b7f5b81f6b680b1bf33346950f43e1cb760182f14d54cb71f5f0c1f2ce20352`
+- `dsh-llm-pi-ai/lib/index.js` SHA256
+  `d46dbc30aeb3414190000e6f8aeaaf994246b5e5c651de07639f4a7e92de37ef`
+
+The exact local installation root is
+`/Users/lynn/.nvm/versions/node/v22.22.2/lib/node_modules/@deepseek-ai/dsh`;
+these dependency paths are under its `node_modules/@deepseek-ai/` directory.
+`dsh-llm/lib/types/types.d.ts:153–174` defines `TokenUsage`: uncached input,
+cache read and cache write are disjoint; authoritative `totalTokens` includes
+aggregate prompt plus output. `dsh-llm-pi-ai/lib/index.js:1369–1377` maps pi-ai
+usage and explicitly omits zero cache fields. Reasoning is folded into output.
 
 The emitter projects `session {sessionId,cwd}`, `status` turn/step start/end,
 `tool_call {callId,tool,input}`, `tool_result {callId,status,result}`, `text`,
@@ -201,9 +211,9 @@ markers; the expected turn-1 exit 3 is a domain failure, not infra failure.
 Successful turn-end reason is `{kind:"completed"}`. JSON emits no per-request
 finish reason, provider/route identity, retry counter, cut marker or surface
 meter. Step usage sums all retry attempts; an attempt missing usage makes the
-step omit usage. Optional cache/total/reasoning counters must not be fabricated:
-absence is recorded as unknown, not zero. An absent entire step usage fails the
-evidence gate; absent cache buckets block cache comparability. Unknown per-request
+step omit usage. Optional counters stay unknown unless an omitted cache bucket
+is proved zero by the derivation below. An absent entire step usage fails the
+evidence gate; unresolved cache buckets block cache comparability. Unknown per-request
 finish reasons/retries remain explicit nulls. Stderr transport/retry evidence
 fails a clean attempt. Silent retry absence cannot be proved by this projection.
 
@@ -220,8 +230,36 @@ All-steps uses the same formula across every step, separately. These are token
 weighted, not means of percentages or prefix-byte similarity. Input is uncached
 input. Collect input, output, cacheRead **and cacheWrite** separately. The actual
 prompt cache-read ratio is `read/(read+input+write)`, and is reported separately,
-particularly when cacheWrite is nonzero. Missing optional cache buckets remain
-unknown; no zero-fill. Partial metrics are explicitly marked and cannot release.
+particularly when cacheWrite is nonzero. Partial metrics are explicitly marked
+and cannot release.
+
+Zero normalization applies only to the verified rc.2 disjoint accounting
+contract; scoring also requires `usage_semantics="disjoint-input-read-write"`.
+Required input/output and every present cache/total/reasoning counter must be
+nonnegative integers (booleans are rejected). On a copy of each usage record,
+compute `known = inputTokens + outputTokens + sum(present cache buckets)` and
+`residual = totalTokens - known`, using only a present authoritative total:
+
+- With residual **zero**, nonnegativity forces every omitted cache bucket to
+  zero. Preserve all explicit counters, including explicit nonzero cache values.
+- With a **positive** residual and an omitted cache bucket, retain every omitted
+  bucket as unknown. Do not allocate the residual or infer a positive cache value.
+- With no total, omitted buckets stay unknown. Never synthesize totalTokens.
+- A **negative** residual, invalid counter, or nonzero residual when both cache
+  buckets are explicit fails evidence. `reasoningTokens` is already in output
+  and is never added to `known`.
+
+Raw JSONL files and parsed raw usage are unchanged. `usage_zero_proofs` in the
+cell report logs each proof's group, turn, step, derived fields, authoritative
+total, known sum and zero residual. Both `first_step` and `all_steps` separately
+report `usage_normalization`: `proven_zero_steps` counts records with any proof;
+`proven_zero_fields`, `explicit_fields` and `unknown_fields` count each cache
+field's provenance, separately from token sums. A record with two proved zeros
+counts once as a proved step and once for each field. Any unresolved bucket
+keeps that aggregate bucket unknown. Comparison output preserves both arms'
+metrics and proof counts under `usage_metrics`; budgets and formulas are unchanged.
+This proof does not establish answer correctness, missing-turn coverage, retries,
+or runtime release readiness, and does not make historical logs current evidence.
 
 `t27_last_request_totalTokens` and `t31_last_request_totalTokens` are the final
 step's JSON usage.totalTokens at those turns, **not actual surface/tokenMeter**.

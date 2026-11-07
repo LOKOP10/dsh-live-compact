@@ -10,6 +10,7 @@ from mkfx import build_log, expected_inventory
 from rubric import behavior, check_command, check_evidence, fields, fill_answer
 
 MAX_LOG_BYTES = 16 * 1024 * 1024
+CACHE_FIELDS = ('cacheReadTokens', 'cacheWriteTokens')
 TRANSPORT = re.compile(r'ECONN\w*|ETIMEDOUT|ENOTFOUND|connection (?:failed|reset|refused)|'
                        r'authentication (?:failed|error)|unauthorized|rate.?limit|'
                        r'HTTP [45]\d\d|retrying|retry attempt|transport error', re.I)
@@ -17,6 +18,31 @@ TRANSPORT = re.compile(r'ECONN\w*|ETIMEDOUT|ENOTFOUND|connection (?:failed|reset
 
 def integer(value):
     return type(value) is int and value >= 0
+
+
+def normalize_usage(usage):
+    """Copy verified DSH rc.2 disjoint usage; prove only omitted cache zeros.
+
+    total = input + output + cacheRead + cacheWrite. With nonnegative
+    counters, a zero residual forces every omitted cache bucket to zero.
+    reasoningTokens is already part of output, never an additional summand.
+    """
+    if not isinstance(usage, dict) or any(not integer(usage.get(k)) for k in ('inputTokens', 'outputTokens')):
+        raise ValueError('missing/invalid step usage')
+    for key in (*CACHE_FIELDS, 'totalTokens', 'reasoningTokens'):
+        if key in usage and not integer(usage[key]):
+            raise ValueError('invalid optional usage bucket')
+    normalized = dict(usage)
+    omitted = tuple(k for k in CACHE_FIELDS if k not in usage)
+    if 'totalTokens' in usage:
+        known = sum(usage[k] for k in ('inputTokens', 'outputTokens', *CACHE_FIELDS) if k in usage)
+        residual = usage['totalTokens'] - known
+        if residual < 0 or (residual > 0 and not omitted):
+            raise ValueError('inconsistent totalTokens')
+        if residual == 0:
+            normalized.update((k, 0) for k in omitted)
+            return normalized, omitted
+    return normalized, ()
 
 
 def same_path(value, expected, cwd):
@@ -63,8 +89,9 @@ def model_validation_error(call, result, cwd):
 
 
 def parse_turn(path, turn, cwd, expected_sid=None):
-    """Validate the actual rc.2 JSON projection. Optional buckets stay unknown."""
+    """Validate rc.2 JSON; retain raw usage and log any proven cache zeros."""
     bad, quality, calls, usages, pairs = [], [], [], [], {}
+    usage_zero_proofs = []
     sid = final = reason = None
     turn_open = ended = False
     step = None
@@ -129,12 +156,12 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 if not isinstance(usage, dict) or any(not integer(usage.get(k)) for k in ('inputTokens', 'outputTokens')):
                     bad.append('missing/invalid step usage')
                 else:
-                    for key in ('cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'reasoningTokens'):
-                        if key in usage and not integer(usage[key]):
-                            raise ValueError('invalid optional usage bucket')
-                    if 'totalTokens' in usage and all(k in usage for k in ('cacheReadTokens', 'cacheWriteTokens')):
-                        if usage['totalTokens'] != sum(usage[k] for k in ('inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens')):
-                            bad.append('inconsistent totalTokens')
+                    _, proven_zero = normalize_usage(usage)
+                    if proven_zero:
+                        usage_zero_proofs.append(dict(step=last_step, fields=list(proven_zero),
+                                                      totalTokens=usage['totalTokens'],
+                                                      knownTokens=sum(usage[k] for k in ('inputTokens', 'outputTokens', *CACHE_FIELDS) if k in usage),
+                                                      residual=0))
                     usages.append(usage)
                     last_step_usage = usage
                     if is_first:
@@ -245,6 +272,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
     if turn == 28:
         quality += fields(final or '', 'recall')
     return dict(session_id=sid, final=final, calls=calls, usage=usages, reason=reason,
+                usage_zero_proofs=usage_zero_proofs,
                 evidence_errors=bad, quality_errors=quality, expected_read=read_ok,
                 first_step_usage=first_step_usage, last_step_usage=last_step_usage,
                 warn_correct=turn in FILL and not any('WARN' in x or 'ambiguous' in x for x in quality),
@@ -288,12 +316,22 @@ def load_evidence(group, turn, cwd, sid):
 
 
 def ratios(usages):
+    normalized, proofs = [], []
+    for usage in usages:
+        value, proven_zero = normalize_usage(usage)
+        normalized.append(value)
+        proofs.append(proven_zero)
     keys = ('inputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens')
-    totals = {k: sum(x[k] for x in usages) if usages and all(k in x for x in usages) else None for k in keys}
+    totals = {k: sum(x[k] for x in normalized) if normalized and all(k in x for x in normalized) else None for k in keys}
     read, miss, write = (totals[k] for k in ('cacheReadTokens', 'inputTokens', 'cacheWriteTokens'))
     totals['read_over_read_plus_input'] = read / (read + miss) if read is not None and miss is not None and read + miss else None
     totals['actual_prompt_read_ratio'] = read / (read + miss + write) if all(x is not None for x in (read, miss, write)) and read + miss + write else None
     totals['steps'] = len(usages)
+    totals['usage_normalization'] = dict(
+        proven_zero_steps=sum(bool(proof) for proof in proofs),
+        proven_zero_fields={k: sum(k in proof for proof in proofs) for k in CACHE_FIELDS},
+        explicit_fields={k: sum(k in usage for usage in usages) for k in CACHE_FIELDS},
+        unknown_fields={k: sum(k not in usage for usage in normalized) for k in CACHE_FIELDS})
     return totals
 
 
@@ -305,11 +343,13 @@ def score_cell(root):
     spec = run['spec']
     if spec.get('arm') not in ('candidate', 'stock') or spec.get('model_family') not in ('ds', 'glm'):
         raise ValueError('invalid model/arm identity')
+    if spec.get('usage_semantics') != 'disjoint-input-read-write':
+        raise ValueError('unverified usage semantics')
     report = dict(version=MANIFEST['version'], arm=spec['arm'], spec=spec,
                   planned_turns=GROUPS * ROUNDS, planned_fill=MANIFEST['fill_per_cell'],
                   complete_turns=0, fill_correct=0, expected_reads=0,
                   fill_complete=0, warn_correct=0, notice_correct=0, projection_truncations=0, model_tool_errors=0,
-                  evidence_errors=[], quality_errors=[], groups=[], fingerprints=run['fingerprints'],
+                  evidence_errors=[], quality_errors=[], groups=[], usage_zero_proofs=[], fingerprints=run['fingerprints'],
                   observability={'request_finish_reason':'not emitted by rc.2 JSON',
                                  'transport_retries':'not emitted; stderr diagnostics detected, silent retries unknown',
                                  'post_cut_first_request':'not observable in JSON; separate cut/request trace required',
@@ -371,6 +411,8 @@ def score_cell(root):
                     report['fill_correct'] += int(not result['quality_errors'] and not result['evidence_errors'])
                 report['projection_truncations'] += result['projection_truncations']
                 report['model_tool_errors'] += result['model_tool_errors']
+                report['usage_zero_proofs'] += [dict(group=rid, turn=turn, **proof)
+                                               for proof in result['usage_zero_proofs']]
                 if result['first_step_usage'] is not None:
                     first.append(result['first_step_usage'])
                 if result['usage']:
@@ -442,6 +484,8 @@ def compare(candidate, stock):
     # release evidence, never fabricated zero counters or a default PASS here.
     return dict(cache_comparison_pass=not errors, errors=errors,
                 cache_release_pass=False,
+                usage_metrics={report['arm']: {section: report[section] for section in ('first_step', 'all_steps')}
+                               for report in (candidate, stock)},
                 remaining_release_evidence=['independent retry/provider-route accounting',
                                            'summary/extra-request cost', 'cut and post-cut request trace',
                                            'runtime threshold/cut controls; stock plugin absence'])
