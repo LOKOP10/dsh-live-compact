@@ -13,9 +13,9 @@
  * Above 650000, small cuts stop for the host gate.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
@@ -931,17 +931,25 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   writeCaptureCursor(key, cursor, access = {}) {
     if (this.persistCapture !== true || !Number.isSafeInteger(cursor) || cursor < 0) return;
     let tmp;
+    let fd;
     try {
       ensureShadowDir(shadowDirectory(), access);
       const file = this.captureCursorFile(key);
-      tmp = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
-      // writeShadowFile normally renames before writing. Use its exclusive path
-      // here, then publish the complete, protected cursor with one rename.
-      writeShadowFile(tmp, JSON.stringify({ v: 1, key, cursor }), access, { exclusive: true });
+      // Cursor metadata is outside the payload cap and needs no rotation lock.
+      // Secure the parent first so Windows temps inherit its private ACL.
+      ensureShadowDir(dirname(file), access);
+      const candidate = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
+      fd = openSync(candidate, "wx", 0o600);
+      tmp = candidate;
+      tightenShadow(tmp, "file", access);
+      writeFileSync(fd, JSON.stringify({ v: 1, key, cursor }));
+      closeSync(fd);
+      fd = undefined;
       renameSync(tmp, file);
     } catch (error) {
       noteShadowWarning(this.ctx?.logger, error);
     } finally {
+      if (fd !== undefined) { try { closeSync(fd); } catch {} }
       if (tmp) { try { unlinkSync(tmp); } catch {} }
     }
   }

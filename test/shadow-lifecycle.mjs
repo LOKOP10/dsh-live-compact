@@ -3,7 +3,7 @@ import fs, { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSy
 import { spawn } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { setImmediate } from "node:timers/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { Session } from "@deepseek-ai/dsh-session";
 import { contentHash, pointerFor, PRUNE_MARKER, rawName } from "../raw.js";
@@ -292,6 +292,68 @@ test("stale or malformed cursor limits recapture to the default three results", 
   }
 });
 
+for (const failure of ["file permission", "partial write"]) {
+  test(`cursor ${failure} failure closes and removes its temp without replacing the published value`, (t) => {
+    const h = runtime(t);
+    const { engine } = h.engine();
+    const key = "failed-cursor";
+    engine.writeCaptureCursor(key, 299);
+    let fd;
+    const open = fs.openSync;
+    const write = fs.writeFileSync;
+    const openMock = t.mock.method(fs, "openSync", (...args) => (fd = open(...args)));
+    const writeMock = t.mock.method(fs, "writeFileSync", (...args) => {
+      write(args[0], "{");
+      throw Object.assign(new Error("partial write failed"), { code: "EIO" });
+    });
+    const access = failure === "file permission" ? { runner: ({ kind }) => kind !== "file" } : {};
+    syncBuiltinESMExports();
+    try { assert.doesNotThrow(() => engine.writeCaptureCursor(key, 300, access)); }
+    finally { openMock.mock.restore(); writeMock.mock.restore(); syncBuiltinESMExports(); }
+    assert.equal(engine.readCaptureCursor(key), 299);
+    assert.equal(Number.isInteger(fd), true);
+    assert.throws(() => fs.fstatSync(fd), (error) => error.code === "EBADF");
+    assert.deepEqual(readdirSync(sessionDir(h.root, key)), [engine.captureCursorFile(key).split(/[\\/]/).at(-1)]);
+  });
+}
+
+test("cursor temps inherit the secured Windows session ACL before creation", (t) => {
+  const h = runtime(t);
+  const { engine } = h.engine();
+  const key = "windows-cursor";
+  const dir = sessionDir(h.root, key);
+  const grants = [];
+  const access = { platform: "win32", env: { SystemRoot: "D:\\WinX" }, execFile(file, args) {
+    if (file.endsWith("whoami.exe")) return '"DESKTOP","S-1-5-21-100-200-300-1001"';
+    assert.ok(file.endsWith("icacls.exe"));
+    grants.push([...args]);
+    return "";
+  } };
+  const open = fs.openSync;
+  let creates = 0;
+  const openMock = t.mock.method(fs, "openSync", (file, flags, mode) => {
+    assert.equal(dirname(String(file)), dir);
+    assert.deepEqual(grants.map((args) => args[0]), [h.root, dir], "both directory ACLs must precede temp creation");
+    assert.equal(flags, "wx");
+    assert.equal(mode, 0o600);
+    creates++;
+    return open(file, flags, mode);
+  });
+  syncBuiltinESMExports();
+  try {
+    engine.writeCaptureCursor(key, 299, access);
+    engine.writeCaptureCursor(key, 300, access);
+  } finally { openMock.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(creates, 2);
+  for (const args of grants) {
+    assert.deepEqual(args.slice(1, 3), ["/inheritance:r", "/grant:r"]);
+    assert.ok(args.slice(3).every((grant) => grant.endsWith(":(OI)(CI)F")));
+  }
+  assert.equal(engine.readCaptureCursor(key), 300);
+  assert.equal(readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
+  assert.deepEqual(h.warnings, []);
+});
+
 test("a stale cursor recaptures three results and restores valid older visible backups", async (t) => {
   const h = runtime(t);
   const f = h.use(fixture());
@@ -309,6 +371,85 @@ test("a stale cursor recaptures three results and restores valid older visible b
   assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long"))?.ok, true);
   await engine.finishTurn(f.agent());
   assert.equal(f.summaries().length, 1);
+});
+
+test("cursor publication persists while another process holds the payload rotation lock", { timeout: 15000 }, async (t) => {
+  const h = runtime(t);
+  const { engine } = h.engine();
+  const key = "cursor-participant";
+  engine.writeCaptureCursor(key, 299);
+  const dir = sessionDir(h.root, key);
+  const payloadDir = sessionDir(h.root, "payload-participant");
+  const payload = join(payloadDir, "cut-1-aaaaaaaa.txt");
+  const lock = join(h.root, ".spine-rotation.lock");
+  const release = join(h.root, "release-holder");
+  const shadowURL = new URL("../shadow.js", import.meta.url).href;
+  const script = `
+    import { existsSync } from 'node:fs';
+    import { ensureShadowDir, withShadowRoot, writeShadowFile } from ${JSON.stringify(shadowURL)};
+    ensureShadowDir(${JSON.stringify(h.root)});
+    withShadowRoot(${JSON.stringify(h.root)}, () => {
+      writeShadowFile(${JSON.stringify(payload)}, 'payload stays unchanged');
+      process.send('locked');
+      const wait = new Int32Array(new SharedArrayBuffer(4));
+      const deadline = Date.now() + 10000;
+      while (!existsSync(${JSON.stringify(release)})) {
+        if (Date.now() > deadline) throw new Error('holder was not released');
+        Atomics.wait(wait, 0, 0, 5);
+      }
+    });
+    process.disconnect();`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: new URL("..", import.meta.url), env: { SPINE_SHADOW_DIR: h.root }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`payload holder exit ${code}: ${stderr}`)));
+  });
+  try {
+    const ready = new Promise((resolve) => child.once("message", resolve));
+    assert.equal(await Promise.race([ready, exited.then(() => assert.fail("holder exited before locking"))]), "locked");
+    assert.notEqual(child.pid, process.pid);
+    assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, child.pid);
+    const snapshot = (file) => {
+      const { dev, ino, size, mtimeMs, ctimeMs } = statSync(file);
+      return { dev, ino, size, mtimeMs, ctimeMs, body: readFileSync(file, "utf8") };
+    };
+    const beforeLock = snapshot(lock);
+    const beforePayload = snapshot(payload);
+    const rootNames = readdirSync(h.root).sort();
+    const payloadNames = readdirSync(payloadDir).sort();
+    const cursorNames = readdirSync(dir).sort();
+    const opens = [];
+    const open = fs.openSync;
+    const openMock = t.mock.method(fs, "openSync", (file, flags, mode) => {
+      opens.push({ file: String(file), flags, mode });
+      return open(file, flags, mode);
+    });
+    const scanMock = t.mock.method(fs, "readdirSync", () => { assert.fail("cursor publication must not scan directories"); });
+    syncBuiltinESMExports();
+    try { engine.writeCaptureCursor(key, 300); }
+    finally { openMock.mock.restore(); scanMock.mock.restore(); syncBuiltinESMExports(); }
+    assert.equal(engine.readCaptureCursor(key), 300);
+    assert.equal(opens.length, 1, "only the cursor temporary file may be opened");
+    assert.equal(dirname(opens[0].file), dir);
+    assert.ok(opens[0].file.endsWith(".tmp"));
+    assert.equal(opens[0].flags, "wx");
+    assert.equal(opens[0].mode, 0o600);
+    assert.deepEqual(snapshot(lock), beforeLock);
+    assert.deepEqual(snapshot(payload), beforePayload);
+    assert.deepEqual(readdirSync(h.root).sort(), rootNames);
+    assert.deepEqual(readdirSync(payloadDir).sort(), payloadNames);
+    assert.deepEqual(readdirSync(dir).sort(), cursorNames);
+    assert.deepEqual(h.warnings, []);
+  } finally {
+    writeFileSync(release, "go");
+    await exited;
+  }
+  assert.equal(existsSync(lock), false, "the holder still releases its own lock");
 });
 
 test("two Node processes publish parseable cursors without losing distinct sessions", { timeout: 15000 }, async (t) => {
