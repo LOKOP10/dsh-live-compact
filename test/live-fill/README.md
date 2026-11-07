@@ -108,11 +108,16 @@ numeric substrings; a filename, `15`/`50` for `5`, guesses, negation, multiple
 answers or contradictory NONE/NOTICE fail. NOTICE text must match the unique
 entire expected original line, with no suffix. An unrelated tool does not prove
 a read: the scorer pairs real `callId`s, validates the requested and returned
-path, successful result and numbered fixture text. Built-in `read` and an exact
-`bash` `cat <expected-path>` are supported; opaque shell programs do not count as
-read proof. Successful bounded JSON projection truncation is recorded, not
-confused with a failed read or transport loss; usable path/content evidence is
-still required.
+path, successful result and numbered fixture text. Built-in `read`, an exact
+`bash` `cat <expected-path>`, and built-in `grep` are supported. Grep accepts only
+`{path, pattern}` for the exact fixture and patterns `WARN`, `NOTICE` or
+`(?i)warn|notice`, without evaluating arbitrary regexes. Its count, basename
+header and every numbered row must match the complete frozen search output;
+no-match-only output is not read proof. Truncated grep must be an exact prefix
+of that output containing at least one complete matching row. Opaque shell
+programs do not count as read proof. Successful bounded JSON projection
+truncation is recorded, not confused with a failed read or transport loss;
+usable path/content evidence is still required.
 
 Turns 28–31 use `manifest.json`'s field/value rubric and actual per-turn workspace
 snapshots, rather than later disk state. Chinese and English field aliases are

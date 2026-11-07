@@ -26,6 +26,30 @@ def same_path(value, expected, cwd):
     return (path if path.is_absolute() else Path(cwd) / path).resolve() == Path(expected).resolve()
 
 
+def grep_proof(args, body, expected, cwd, fixture_lines, truncated=False):
+    """Only the bounded built-in grep schema/patterns, never arbitrary regex."""
+    pattern = args.get('pattern')
+    if (set(args) != {'path', 'pattern'} or
+            pattern not in ('WARN', 'NOTICE', '(?i)warn|notice') or
+            not same_path(args.get('path'), expected, cwd)):
+        return False
+    rows = []
+    for number, line in enumerate(fixture_lines, 1):
+        matches = (('warn' in line.lower() or 'notice' in line.lower())
+                   if pattern == '(?i)warn|notice' else pattern in line)
+        if matches:
+            rows.append(f'Line {number}: {line}')
+    if not rows:
+        return False
+    header = f'Found {len(rows)} matches\n\n{expected.name}\n'
+    proof = header + '\n'.join(rows)
+    if body in (proof, proof + '\n'):
+        return True
+    # Validate even a partial trailing row against the frozen output prefix.
+    return (truncated is True and body.startswith(header + rows[0] + '\n')
+            and proof.startswith(body))
+
+
 def parse_turn(path, turn, cwd, expected_sid=None):
     """Validate the actual rc.2 JSON projection. Optional buckets stay unknown."""
     bad, quality, calls, usages, pairs = [], [], [], [], {}
@@ -168,6 +192,9 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 if header and same_path(header[1], expected, cwd) and numbered:
                     if all(1 <= int(n) <= len(fixture_lines) and fixture_lines[int(n)-1] == text for n, text in numbered):
                         read_ok = True
+            elif call['tool'] == 'grep':
+                if grep_proof(args, body, expected, cwd, fixture_lines, result.get('truncated')):
+                    read_ok = True
             elif call['tool'] == 'bash':
                 import shlex
                 try:

@@ -80,6 +80,149 @@ class ParserTests(unittest.TestCase):
             return
         self.assertTrue(parsed['evidence_errors'] or parsed['quality_errors'])
 
+    def grep_events(self, turn=2, pattern='WARN'):
+        items = events(turn, self.cwd, 'sid')
+        call = next(x for x in items if x['type'] == 'tool_call')
+        result = next(x for x in items if x['type'] == 'tool_result')
+        call.update(tool='grep', input={'path': str(self.cwd/f'part{turn}.log'), 'pattern': pattern})
+        prefixes = ('WARN', 'NOTICE') if pattern == '(?i)warn|notice' else (pattern,)
+        rows = [f'Line {n}: {line}' for n, line in enumerate(build_log(turn)[0].splitlines(), 1)
+                if line.startswith(prefixes)]
+        result['result'] = (f'Found {len(rows)} matches\n\npart{turn}.log\n' + '\n'.join(rows)
+                            if rows else 'No matches found')
+        return items, call, result
+
+    def parse_items(self, items, turn=2):
+        write_events(self.path, items)
+        return parse_turn(self.path, turn, self.cwd, 'sid')
+
+    def test_builtin_grep_frozen_matches(self):
+        for turn in FILL:
+            for pattern in ('WARN', 'NOTICE', '(?i)warn|notice'):
+                if pattern == 'NOTICE' and str(turn) not in MANIFEST['notices']:
+                    continue
+                for ending in ('', '\n'):
+                    with self.subTest(turn=turn, pattern=pattern, ending=repr(ending)):
+                        items, _, result = self.grep_events(turn, pattern)
+                        result['result'] += ending
+                        parsed = self.parse_items(items, turn)
+                        self.assertTrue(parsed['expected_read'])
+                        self.assertEqual(parsed['evidence_errors'], [])
+                        self.assertEqual(parsed['quality_errors'], [])
+
+    def test_builtin_grep_no_match_requires_nonempty_proof(self):
+        items, _, _ = self.grep_events(pattern='NOTICE')
+        parsed = self.parse_items(items)
+        self.assertFalse(parsed['expected_read'])
+        self.assertEqual(parsed['evidence_errors'], ['no successful correlated read of expected file'])
+        self.assertEqual(parsed['quality_errors'], [])
+        # Historical turn 2: WARN, absent NOTICE, then combined search.
+        for pattern in ('WARN', '(?i)warn|notice'):
+            _, call, result = self.grep_events(pattern=pattern)
+            call['callId'] = result['callId'] = pattern
+            items[3:3] = [call, result]
+        parsed = self.parse_items(items)
+        self.assertTrue(parsed['expected_read'])
+        self.assertEqual(parsed['evidence_errors'], [])
+
+    def test_builtin_grep_rejects_wrong_paths_and_arguments(self):
+        invalid = [dict(path=str(self.cwd/'part3.log')),
+                   dict(path=str(self.cwd.parent/'part2.log')),
+                   dict(path=str(self.cwd)), dict(path=str(self.cwd/'part*.log')),
+                   dict(path=None), dict(pattern=None), dict(pattern=['WARN']),
+                   dict(pattern='WARN|NOTICE'), dict(pattern='^(a+)+$'),
+                   dict(pattern=''), dict(include='*.log'), dict(context=1)]
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                items, call, _ = self.grep_events()
+                call['input'].update(changes)
+                self.check_bad(items)
+        for key in ('path', 'pattern'):
+            items, call, _ = self.grep_events()
+            del call['input'][key]
+            self.check_bad(items)
+        items, call, _ = self.grep_events()
+        call['tool'] = 'custom_grep'
+        self.check_bad(items)
+
+    def test_builtin_grep_rejects_fabricated_output(self):
+        body = self.grep_events()[2]['result']
+        first = 'Line 181: WARN ledger drift turn=2 n=0'
+        second = 'Line 188: WARN ledger drift turn=2 n=1'
+        invalid = [body.replace('part2.log', 'part3.log'),
+                   body.replace('part2.log', str(self.cwd/'part2.log')),
+                   body.replace('\n\npart2.log', '\npart2.log'),
+                   body.replace(first, first+' altered'),
+                   body.replace('Line 181:', 'Line 0:'),
+                   body.replace('Line 181:', 'Line 521:'),
+                   body.replace(first, 'Line 1: '+build_log(2)[0].splitlines()[0]),
+                   body.replace(second, first), body.replace(second+'\n', ''),
+                   body.replace(first+'\n'+second, second+'\n'+first),
+                   body+'\n'+first, body+'\n\n', body+'\nextra output',
+                   body.replace('Line 181:', 'Line 0181:')]
+        invalid += [body.replace('Found 5 matches', f'Found {count} matches')
+                    for count in ('0', '4', '6', '-5', '5.0', '05', '9'*5000)]
+        for index, forged in enumerate(invalid):
+            for truncated in (False, True):
+                with self.subTest(case=index, truncated=truncated):
+                    items, _, result = self.grep_events()
+                    result.update(result=forged, truncated=truncated)
+                    parsed = self.parse_items(items)
+                    self.assertFalse(parsed['expected_read'])
+                    self.assertTrue(parsed['evidence_errors'])
+        items, _, result = self.grep_events(pattern='NOTICE')
+        result['result'] = body
+        self.assertFalse(self.parse_items(items)['expected_read'])
+
+    def test_builtin_grep_projection_prefix_requires_complete_match(self):
+        body = self.grep_events()[2]['result']
+        second = body.index('Line 188:')
+        for end in (second, second+12):
+            with self.subTest(end=end):
+                items, _, result = self.grep_events()
+                result.update(result=body[:end], truncated=True)
+                parsed = self.parse_items(items)
+                self.assertTrue(parsed['expected_read'])
+                self.assertEqual(parsed['evidence_errors'], [])
+                self.assertEqual(parsed['projection_truncations'], 1)
+                result.pop('truncated')
+                self.assertFalse(self.parse_items(items)['expected_read'])
+        for prefix in ('', 'Found 5 matches\n\npart2.log\n', body[:second-2],
+                       body[:second+12]+'fabricated'):
+            items, _, result = self.grep_events()
+            result.update(result=prefix, truncated=True)
+            self.assertFalse(self.parse_items(items)['expected_read'])
+
+    def test_builtin_grep_keeps_pairing_and_infrastructure_failures(self):
+        for change in ('unpaired', 'missing', 'duplicate', 'error', 'timeout', 'event', 'essential'):
+            with self.subTest(change=change):
+                items, call, result = self.grep_events()
+                if change == 'unpaired':
+                    result['callId'] = 'other'
+                elif change == 'missing':
+                    items.remove(result)
+                elif change == 'duplicate':
+                    items.insert(5, copy.deepcopy(result))
+                elif change == 'error':
+                    result['status'] = 'error'
+                elif change == 'timeout':
+                    result['result'] += '\n[Command timed out]'
+                elif change == 'event':
+                    items.insert(5, dict(type='error'))
+                else:
+                    call['truncated'] = True
+                self.check_bad(items)
+
+    def test_builtin_grep_does_not_relax_answer_grammar(self):
+        for answer in ('WARN: 15\nNONE', 'WARN: 5 or 6\nNONE',
+                       'WARN: 5\nNONE\nNOTICE invented'):
+            items, _, _ = self.grep_events()
+            items[-1]['text'] = answer
+            parsed = self.parse_items(items)
+            self.assertTrue(parsed['expected_read'])
+            self.assertEqual(parsed['evidence_errors'], [])
+            self.assertTrue(parsed['quality_errors'])
+
     def test_empty_final(self):
         self.items[-1]['text'] = ''
         self.check_bad()
