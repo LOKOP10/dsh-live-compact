@@ -199,6 +199,8 @@ or reader name. Pattern matching, exception-handler bindings and type aliases
 are outside this small language and require command review. Binding checks must
 also pass on Python 3.10+; a Python 3.9 syntax rejection alone is not evidence
 that a newer grammar cannot bypass the audit.
+Path construction using `/` or `/=` is rejected; the audit accepts literal
+reader paths and does not infer paths after arithmetic or augmented assignment.
 Bash accepts optional nonblank string `description` as UI metadata
 only; it grants no execution permission. Unknown or unsupported input keys fail.
 Dynamic expansion, arbitrary scripts/interpreters, unsupported

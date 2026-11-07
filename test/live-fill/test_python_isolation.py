@@ -26,6 +26,24 @@ class PythonIsolationTests(unittest.TestCase):
             self.assertEqual(tool_errors({'tool':'write','input':{'file_path':'csv.py','content':module}},27,cwd=root),[])
             self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':"python3 -c 'import csv'"}},29,cwd=root))
 
+    def test_augmented_path_division_cannot_hide_part_log_reread(self):
+        import shlex
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'part14.log').write_text('SYNTHETIC_AUGMENTED_PATH')
+            source='from pathlib import Path; p = Path("."); p /= "pa" + "rt14.log"; print(p.read_text())'
+            actual=subprocess.check_output([sys.executable,'-I','-c',source],cwd=root,text=True,timeout=10)
+            self.assertEqual(actual.strip(),'SYNTHETIC_AUGMENTED_PATH')
+            self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':'python3 -I -c '+shlex.quote(source)}},29,cwd=root))
+
+    def test_augmented_path_division_cannot_escape_workspace(self):
+        import shlex
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)/'work';root.mkdir();outside=Path(temp)/'outside.txt';outside.write_text('SYNTHETIC_OUTSIDE_PATH')
+            source='from pathlib import Path; p = Path("."); p /= '+repr(str(outside))+'; print(p.read_text())'
+            actual=subprocess.check_output([sys.executable,'-I','-c',source],cwd=root,text=True,timeout=10)
+            self.assertEqual(actual.strip(),'SYNTHETIC_OUTSIDE_PATH')
+            self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':'python3 -I -c '+shlex.quote(source)}},14,cwd=root))
+
     def test_nonisolated_and_ambiguous_flags_are_rejected(self):
         for command in ("python3 -c 'import csv'", "python -c 'print(1)'",
                         "python3 -E -c 'import json'", "python3 -s -c 'import pathlib'",

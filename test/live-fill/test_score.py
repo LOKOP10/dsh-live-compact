@@ -639,7 +639,8 @@ class FullCellTests(unittest.TestCase):
         for index,call in enumerate(calls):
             extra += [dict(type='tool_call',callId=f'policy-{index}',**call),
                       dict(type='tool_result',callId=f'policy-{index}',status='completed',result='[exit code: 0]')]
-        items[5:5]=extra
+        position=next(i for i,item in enumerate(items) if item.get('type')=='status' and item.get('phase')=='step_end')
+        items[position:position]=extra
         with contextlib.ExitStack() as changes:
             data=''.join(json.dumps(x)+chr(10) for x in items).encode();changes.enter_context(self.changed(path,data))
             for suffix in ('.meta.json','.process.json'):
@@ -692,6 +693,13 @@ class FullCellTests(unittest.TestCase):
                dict(tool='write',input={'file_path':'sample.csv','content':csv}),
                dict(tool='bash',input={'command':"rg -o '^[^,]+' '>' sample.csv part14.log"})]
         with self.injected_turn(14,calls,{'>':'','sample.csv':csv}) as report:
+            self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+            self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+            self.assertFalse(report['hard_quality_pass'])
+
+    def test_augmented_path_division_hard_fails_with_correct_finals(self):
+        command="python3 -I -c 'from pathlib import Path; p = Path(\".\"); p /= \"pa\" + \"rt14.log\"; print(p.read_text())'"
+        with self.injected_turn(29,[dict(tool='bash',input={'command':command})]) as report:
             self.assertTrue(report['evidence_pass'],report['evidence_errors'])
             self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
             self.assertFalse(report['hard_quality_pass'])

@@ -154,7 +154,7 @@ def python_errors(source, turn):
         # this literal reader language; never let them redefine recognized calls.
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                              ast.ExceptHandler)) or type(node).__name__ in ('Match', 'TypeAlias') or (
-                isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
+                isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Div)):
             bad.append(OPAQUE)
         if isinstance(node, (ast.Name, ast.Attribute)):
             name = node.id if isinstance(node, ast.Name) else node.attr
