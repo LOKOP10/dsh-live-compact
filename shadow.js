@@ -24,9 +24,71 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, win32 } from "node:path";
 
+const DRIVE_ROOT = /^[A-Za-z]:[\\/]/;
 const PLUGIN_NAME = /^(?:(?:cut|official|shadow)-\d+-[0-9a-f]{8}|raw-[0-9a-f]{16}|\d+-[0-9a-f]{8}-[0-9a-f]{8}|\d+-[0-9a-f]{8,16})\.txt$/;
+let cachedSid = "";
+const lockedDirs = new Set();
+let shadowFuse = false;
+const shadowWarnings = new Set();
+
+export function resetShadowAccessState() {
+  cachedSid = "";
+  lockedDirs.clear();
+  shadowFuse = false;
+  shadowWarnings.clear();
+}
+
+export function shadowAccessFused() {
+  return shadowFuse;
+}
+
+function tripFuse() {
+  shadowFuse = true;
+}
+
+function envValue(env, name) {
+  if (!env) return "";
+  const found = Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase());
+  return found ? String(env[found] ?? "").trim() : "";
+}
+
+export function windowsSystemRoot(env = process.env) {
+  const systemRoot = envValue(env, "SystemRoot");
+  const windir = envValue(env, "windir");
+  const root = (DRIVE_ROOT.test(systemRoot) ? systemRoot : "") || (DRIVE_ROOT.test(windir) ? windir : "");
+  return root.replace(/[\\/]+$/, "");
+}
+
+export function win32Tool(name, env = process.env) {
+  const root = windowsSystemRoot(env);
+  if (!root) {
+    const error = new Error("spine: Windows system root is not a drive path");
+    error.code = "ESHADOWACCESS";
+    throw error;
+  }
+  return win32.join(root, "System32", name);
+}
+
+function lockKey(path) {
+  return resolve(path).replace(/[\\/]+$/, "").toLowerCase();
+}
+
+export function shadowDirLocked(path) {
+  return lockedDirs.has(lockKey(path));
+}
+
+export function noteShadowWarning(logger, error) {
+  const code = error?.code || "ESHADOWACCESS";
+  if (shadowWarnings.has(code)) return;
+  shadowWarnings.add(code);
+  const status = error?.cause?.status ?? error?.status;
+  const step = error?.step || error?.cause?.step || "";
+  const where = step ? ` ${step}` : "";
+  const exit = status == null ? "" : ` exit ${status}`;
+  logger?.warn?.(`spine: shadow permission failed ${code}${where}${exit}`);
+}
 const SESSION_MARK = /^# spine-session (\S+)/;
 
 export function isPluginShadowName(name) {
@@ -215,53 +277,112 @@ export function shadowAccessPlan(platform = process.platform, userSid = "", kind
   };
 }
 
-export function defaultShadowAccessRunner({ path, kind, platform, execFile = execFileSync }) {
+export function defaultShadowAccessRunner({
+  path,
+  kind,
+  platform,
+  execFile = execFileSync,
+  env = process.env,
+} = {}) {
   if (platform !== "win32") {
     const plan = shadowAccessPlan(platform);
     chmodSync(path, kind === "dir" ? plan.dirMode : plan.fileMode);
     return true;
   }
 
-  const identity = execFile(
-    "whoami.exe",
-    ["/user", "/fo", "csv", "/nh"],
-    { encoding: "utf8", windowsHide: true },
-  );
-  const match = identity.match(/,"(S-\d+(?:-\d+)+)"\s*$/i);
-  if (!match) {
-    throw new Error("spine: cannot determine current Windows user SID");
+  if (shadowFuse) {
+    const error = new Error("spine: shadow permission already failed");
+    error.code = "ESHADOWACCESS";
+    throw error;
   }
 
-  const plan = shadowAccessPlan("win32", match[1], kind);
-  execFile(
-    "icacls.exe",
-    [resolve(path), "/inheritance:r", "/grant:r", ...plan.grant],
-    { stdio: "pipe", windowsHide: true },
-  );
+  let whoamiPath = "";
+  let icaclsPath = "";
+  try {
+    whoamiPath = win32Tool("whoami.exe", env);
+    icaclsPath = win32Tool("icacls.exe", env);
+  } catch (error) {
+    tripFuse();
+    throw error;
+  }
 
+  let sid = cachedSid;
+  if (!sid) {
+    let identity = "";
+    try {
+      identity = execFile(whoamiPath, ["/user", "/fo", "csv", "/nh"], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+    } catch (error) {
+      error.step = "whoami";
+      tripFuse();
+      throw error;
+    }
+    const match = String(identity ?? "").match(/,"(S-\d+(?:-\d+)+)"\s*$/i);
+    if (!match) {
+      const error = new Error("spine: cannot determine current Windows user SID");
+      error.step = "whoami";
+      tripFuse();
+      throw error;
+    }
+    sid = match[1];
+    cachedSid = sid;
+  }
+
+  const plan = shadowAccessPlan("win32", sid, kind);
+  try {
+    execFile(
+      icaclsPath,
+      [resolve(path), "/inheritance:r", "/grant:r", ...plan.grant],
+      { stdio: "pipe", windowsHide: true },
+    );
+  } catch (error) {
+    error.step = kind === "file" ? "file" : "dir";
+    tripFuse();
+    throw error;
+  }
+
+  if (kind === "dir") lockedDirs.add(lockKey(path));
   return true;
 }
 
 export function tightenShadow(path, kind = "dir", access = {}) {
   const platform = access.platform ?? process.platform;
-  const runner = access.runner ?? defaultShadowAccessRunner;
+  const windows = platform === "win32" && !access.runner;
+  if (windows && kind === "file" && shadowDirLocked(dirname(path))) return;
+  if (windows && shadowFuse) {
+    const error = new Error("spine: shadow permission action failed; backup refused");
+    error.code = "ESHADOWACCESS";
+    throw error;
+  }
+
+  const runner = access.runner ?? ((action) => defaultShadowAccessRunner({
+    ...action,
+    execFile: access.execFile,
+    env: access.env,
+  }));
 
   try {
-    if (runner({ path, kind, platform }) !== true) {
+    if (runner({ path, kind, platform, env: access.env, execFile: access.execFile }) !== true) {
       throw new Error("permission runner did not confirm success");
     }
   } catch (cause) {
+    if (windows) tripFuse();
     const error = new Error(
       "spine: shadow permission action failed; backup refused",
       { cause },
     );
     error.code = "ESHADOWACCESS";
+    error.step = cause?.step;
     throw error;
   }
 }
 
 export function ensureShadowDir(dir, access = {}) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const platform = access.platform ?? process.platform;
+  if (!access.runner && platform === "win32" && shadowDirLocked(dir)) return dir;
   tightenShadow(dir, "dir", access);
   return dir;
 }

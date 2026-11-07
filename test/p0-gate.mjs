@@ -10,7 +10,7 @@ import {
   statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   attachBackupHint,
@@ -30,9 +30,11 @@ import {
 } from "../raw.js";
 import {
   defaultShadowAccessRunner,
+  resetShadowAccessState,
   sessionDir,
   shadowAccessPlan,
   tightenShadow,
+  win32Tool,
   writeShadowOwner,
 } from "../shadow.js";
 
@@ -198,13 +200,17 @@ check("p0-1 windows plan replaces the complete protected DACL", () => {
 check("p0-1 windows default runner applies the restrictive ACL", () => {
   const sid = "S-1-5-21-100-200-300-1001";
   const target = join(tmpdir(), "spine-p0-windows", "session");
+  const env = { SystemRoot: "D:\\WinX" };
+  const whoami = win32Tool("whoami.exe", env);
+  const icacls = win32Tool("icacls.exe", env);
 
   for (const kind of ["dir", "file"]) {
+    resetShadowAccessState();
     const calls = [];
     const execFile = (file, args) => {
       calls.push({ file, args: [...args] });
-      if (file === "whoami.exe") return `"DESKTOP\p0","${sid}"`;
-      assert.equal(file, "icacls.exe");
+      if (file === whoami) return `"DESKTOP-P0","${sid}"`;
+      assert.equal(file, icacls);
       return "";
     };
 
@@ -213,43 +219,46 @@ check("p0-1 windows default runner applies the restrictive ACL", () => {
       kind,
       platform: "win32",
       execFile,
+      env,
     }), true);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].file, "whoami.exe");
+    assert.equal(calls[0].file, whoami);
     assert.deepEqual(calls[0].args, ["/user", "/fo", "csv", "/nh"]);
-    assert.equal(calls[1].file, "icacls.exe");
+    assert.equal(calls[1].file, icacls);
+    assert.equal(calls[1].args.includes("/restore"), false);
     assert.deepEqual(calls[1].args, [
       resolve(target),
       "/inheritance:r",
       "/grant:r",
       ...shadowAccessPlan("win32", sid, kind).grant,
     ]);
+    assert.equal(calls.some((call) => String(call.file).includes("C:\\Windows")), false);
   }
 });
 
 check("p0-1 windows icacls failure closes the write", () => {
   const sid = "S-1-5-21-100-200-300-1001";
+  const env = { SystemRoot: "D:\\WinX" };
+  const whoami = win32Tool("whoami.exe", env);
+  const icacls = win32Tool("icacls.exe", env);
   const target = mkdtempSync(join(tmpdir(), "spine-p0-denied-"));
   try {
+    resetShadowAccessState();
     chmodSync(target, 0o755);
     const calls = [];
     assert.throws(
       () => tightenShadow(target, "dir", {
         platform: "win32",
-        runner(action) {
-          return defaultShadowAccessRunner({
-            ...action,
-            execFile(file) {
-              calls.push(file);
-              if (file === "whoami.exe") return `"DESKTOP\\p0","${sid}"`;
-              throw new Error("injected icacls failure");
-            },
-          });
+        env,
+        execFile(file) {
+          calls.push(file);
+          if (file === whoami) return `"DESKTOP-P0","${sid}"`;
+          throw Object.assign(new Error("injected icacls failure"), { status: 1300 });
         },
       }),
       (error) => error?.code === "ESHADOWACCESS",
     );
-    assert.deepEqual(calls, ["whoami.exe", "icacls.exe"]);
+    assert.deepEqual(calls, [whoami, icacls]);
     if (process.platform !== "win32") {
       assert.equal(statSync(target).mode & 0o777, 0o755);
     }
@@ -288,24 +297,22 @@ check("p0-1 whoami failure does not fall back to chmod", () => {
       () => `"DESKTOP\\p0","not-a-sid"`,
     ];
     for (const whoami of cases) {
+      resetShadowAccessState();
       chmodSync(target, 0o755);
       const calls = [];
+      const tool = win32Tool("whoami.exe", { SystemRoot: "D:\\WinX" });
       assert.throws(
         () => tightenShadow(target, "dir", {
           platform: "win32",
-          runner(action) {
-            return defaultShadowAccessRunner({
-              ...action,
-              execFile(file) {
-                calls.push(file);
-                return whoami();
-              },
-            });
+          env: { SystemRoot: "D:\\WinX" },
+          execFile(file) {
+            calls.push(file);
+            return whoami();
           },
         }),
         (error) => error?.code === "ESHADOWACCESS",
       );
-      assert.deepEqual(calls, ["whoami.exe"]);
+      assert.deepEqual(calls, [tool]);
       if (process.platform !== "win32") {
         assert.equal(statSync(target).mode & 0o777, 0o755);
       }
@@ -758,8 +765,8 @@ check("p0-15 importing index never resolves shadow-search.js", () => {
   assert.equal(/shadow-search/.test(resolved), false);
 });
 
-check("p0-15 package version is 1.1.0", () => {
-  assert.equal(packageJson.version, "1.1.0");
+check("p0-15 package version is 1.1.1", () => {
+  assert.equal(packageJson.version, "1.1.1");
 });
 
 check("p0-15 README drops obsolete backup limits", () => {

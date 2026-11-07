@@ -25,8 +25,10 @@ import {
   discardShadowFiles,
   ensureShadowDir,
   flushDrainStats,
+  noteShadowWarning,
   rotateShadow,
   sessionDir,
+  shadowAccessFused,
   shadowFileBody,
   shadowMaxBytes,
   writeShadowFile,
@@ -407,9 +409,13 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         await Promise.allSettled(pendingCuts);
       });
       ctx.on("session/event", (session, event) => {
-        this.noteEvent(session, event);
-        if (event?.type !== "tool/result") return;
-        this.captureOne(session, event);
+        try {
+          this.noteEvent(session, event);
+          if (event?.type !== "tool/result") return;
+          this.captureOne(session, event);
+        } catch (error) {
+          noteShadowWarning(ctx.logger, error);
+        }
       });
       ctx.on("agent/status", ({ agent, status }) => {
         if (status !== "idle") return;
@@ -419,10 +425,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const done = events.some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
         if (!done) return;
         state.warming = true;
-        const job = this.finishTurn(agent, events).finally(() => {
-          state.warming = false;
-          pendingCuts.delete(job);
-        });
+        const job = this.finishTurn(agent, events)
+          .catch((error) => noteShadowWarning(this.ctx?.logger, error))
+          .finally(() => {
+            state.warming = false;
+            pendingCuts.delete(job);
+          });
         pendingCuts.add(job);
       });
     } catch (error) {
@@ -760,6 +768,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const key = session?.id || DEFAULT_KEY;
     const mapKey = this.rawKey(session, id);
     if (this.rawSeen.get(mapKey)?.ok) return this.rawSeen.get(mapKey);
+    const platform = access.platform ?? process.platform;
+    if (!access.runner && platform === "win32" && shadowAccessFused()) {
+      const skipped = { ok: false, reason: "unwritable", toolCallId: id };
+      this.rawSeen.set(mapKey, skipped);
+      return skipped;
+    }
     const call = this.callIndex.get(session?.id || DEFAULT_KEY)?.get(id) || null;
     try {
       const shadow = shadowDirectory();
@@ -786,7 +800,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         error?.code === "ESHADOWACCESS" ||
         error?.code === "ESHADOWCLEANUP"
       ) {
-        throw error;
+        noteShadowWarning(this.ctx?.logger, error);
+        const refused = { ok: false, reason: "unwritable", toolCallId: id };
+        this.rawSeen.set(mapKey, refused);
+        return refused;
       }
       const message = error instanceof Error ? error.message : String(error);
       this.ctx?.logger?.warn?.(`spine: raw backup failed: ${message}`);
@@ -951,7 +968,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         error?.code === "ESHADOWACCESS" ||
         error?.code === "ESHADOWCLEANUP"
       ) {
-        throw error;
+        noteShadowWarning(this.ctx?.logger, error);
       }
     }
     const joined = input.messages.map(messageText).join("\n\n");

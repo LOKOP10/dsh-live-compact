@@ -19,13 +19,13 @@ DSH 把压缩写死在大约 80%。不到这条线，上下文一直堆。到了
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.0
+dsh plugin --profile headless add dsh-live-compact@1.1.1
 ```
 
 网页和桌面端（共用 web profile，装一次两边都生效）：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.1.0
+dsh plugin --profile web add dsh-live-compact@1.1.1
 ```
 
 想先装到本机看版本：
@@ -34,6 +34,13 @@ dsh plugin --profile web add dsh-live-compact@1.1.0
 npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
+
+## 1.1.1
+
+1. Windows 上取 SID 和写权限不再走 PATH。固定调用 `%SystemRoot%\System32` 下的 `whoami.exe` 和 `icacls.exe`。环境变量不是盘符绝对路径时，这次备份直接跳过，不退回裸命令名。
+2. 不再使用需要还原特权的 `icacls /restore`。目录用 `/inheritance:r /grant:r`，给当前用户、SYSTEM、Administrators 三条可继承的完全控制。文件只用 `F`，不带 `(OI)(CI)`。已收紧目录里的文件不再逐条跑 `icacls`。当前用户 SID 和目录权限每个进程只做一次。
+3. 权限失败不再把宿主打退出。这次备份不落盘，不退回 `chmod`，只提示一次。压缩照常进行。
+4. 切点、65 万、3.2 万、`CHUNK_MIN`、云端默认值和 `SPINE_THUNDER` 没改。
 
 ## 1.1.0
 
@@ -259,8 +266,8 @@ dsh-live-compact --version
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.0
-dsh plugin --profile web add dsh-live-compact@1.1.0
+dsh plugin --profile headless add dsh-live-compact@1.1.1
+dsh plugin --profile web add dsh-live-compact@1.1.1
 ```
 
 想先装到本机看版本：
@@ -270,12 +277,12 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.0.9 的旧链接仍在。
+备用：上不了 npm 的，用国内镜像站的包。1.0.2 到 1.1.0 的旧链接仍在。
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.0.tgz"
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.1.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.1.tgz
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.1.tgz"
 dsh-live-compact --version
 ```
 
