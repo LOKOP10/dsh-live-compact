@@ -1,28 +1,18 @@
 /**
- * 唯一写 DSH 包名的地方。换成别的宿主版本只改这里。
+ * 唯一写 DSH 包名的地方。改宿主版本时，这里的符号和 package.json 的
+ * engines/peerDependencies 一起改。
  * The only file that names a DSH package.
  *
- * 上游区间在 package.json：engines.dsh 与 peerDependencies，>=0.2.0-rc.2 <0.3.0。
- * adapter 只做搬名，不做版本探测、不做兜底、不做降级；加载失败由 shell.js 决定退到原版。
- * Names only. No version probe, no fallback: shell.js owns the degrade decision.
+ * 三个 loader 分开：谁缺谁失败，shell.js 才知道还能不能退到原版压缩。
+ * 不走静态 export...from，否则 gate.js 在没有上游时也无法求值，fail-soft 会坏。
+ * Three separate loaders; static re-export would break gate.js when a host lacks a package.
+ * 不做版本探测，不做兜底：降级只发生在 shell.js。
  */
 
 export const STOCK_ENGINE = "@deepseek-ai/dsh-compaction-basic";
 
-export async function loadUpstream() {
-  const [basic, compaction, llm] = await Promise.all([
-    import("@deepseek-ai/dsh-compaction-basic"),
-    import("@deepseek-ai/dsh-compaction"),
-    import("@deepseek-ai/dsh-llm"),
-  ]);
+export const loadBase = () => import("@deepseek-ai/dsh-compaction-basic");
 
-  return {
-    BasicCompactionEngine: basic.BasicCompactionEngine,
-    CompactionEngine: compaction.CompactionEngine,
-    ManualCompactionError: compaction.ManualCompactionError,
-    CompactionId: compaction.CompactionId,
-    toolPairingBalancedAfter: compaction.toolPairingBalancedAfter,
-    toolPairingBalancedBefore: compaction.toolPairingBalancedBefore,
-    createUserMessage: llm.createUserMessage,
-  };
-}
+export const loadCompaction = () => import("@deepseek-ai/dsh-compaction");
+
+export const loadLlm = () => import("@deepseek-ai/dsh-llm");

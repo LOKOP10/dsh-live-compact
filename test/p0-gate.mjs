@@ -699,7 +699,7 @@ function packageJavaScriptFiles(dir) {
     if (entry.isDirectory()) {
       if (entry.name === "test" || entry.name === "node_modules") continue;
       files.push(...packageJavaScriptFiles(path));
-    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+    } else if (entry.isFile() && /\.(?:js|mjs|cjs)$/.test(entry.name)) {
       files.push(path);
     }
   }
@@ -774,12 +774,13 @@ check("p0-15 README drops obsolete backup limits", () => {
   assert.equal(/\b(64|128)\s*Mi?B\b/i.test(readme), false);
 });
 
-check("p0-16 only adapter.js names a DSH package", () => {
+check("p0-16 only adapter.js imports a DSH package", () => {
+  const adapter = join(packageRoot, "adapter.js");
   const files = packageJavaScriptFiles(packageRoot);
-  assert.ok(files.length > 0);
+  assert.ok(files.includes(adapter), adapter);
   for (const file of files) {
-    const names = /@deepseek-ai\//.test(readFileSync(file, "utf8"));
-    assert.equal(names, basename(file) === "adapter.js", file);
+    const imports = /(?:from\s*|import\(\s*|require\(\s*)["']@deepseek-ai\//.test(readFileSync(file, "utf8"));
+    assert.equal(imports, file === adapter, file);
   }
 });
 
