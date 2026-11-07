@@ -231,6 +231,7 @@ for (const stage of ["acquisition", "release"]) for (const change of ["inode", "
     let failed = false;
     let expected;
     let expectedInode;
+    let replacementBlocked = false;
     withFsMock(t, "linkSync", (link) => (source, target) => {
       link(source, target);
       if (target === lock && stage === "acquisition") pending = true;
@@ -246,9 +247,17 @@ for (const stage of ["acquisition", "release"]) for (const change of ["inode", "
           expected = change === "record" ? holder(process.pid, "b".repeat(48)) : "unverifiable";
           writeFileSync(lock, expected); // Same inode, different record.
         } else if (change === "root") {
-          renameSync(f.dir, old);
-          mkdirSync(f.dir);
-          fs.linkSync(join(old, LOCK), lock); // Even the exact record cannot waive root identity.
+          try { renameSync(f.dir, old); } catch (error) {
+            // Windows may deny moving a directory containing the open guard.
+            // In that branch verify cleanup of the unchanged owned lock below.
+            assert.equal(process.platform, "win32");
+            assert.ok(["EPERM", "EACCES", "EBUSY"].includes(error.code));
+            replacementBlocked = true;
+          }
+          if (!replacementBlocked) {
+            mkdirSync(f.dir);
+            fs.linkSync(join(old, LOCK), lock); // Even the exact record cannot waive root identity.
+          }
         }
         expectedInode = statSync(lock).ino;
         throw failure;
@@ -263,6 +272,13 @@ for (const stage of ["acquisition", "release"]) for (const change of ["inode", "
         (error) => error.code === "ESHADOWBUSY" && error.cause === failure);
     }));
     assert.equal(failed, true);
+    if (replacementBlocked) {
+      assert.equal(existsSync(old), false);
+      assert.equal(statSync(f.dir).isDirectory(), true);
+      assert.equal(existsSync(lock), false, "unchanged owned guard must be cleaned after read failure");
+      assert.equal(rotation(f).ok, true, "OS-blocked replacement must not strand the root");
+      return;
+    }
     assert.equal(readFileSync(lock, "utf8"), expected);
     assert.equal(statSync(lock).ino, expectedInode);
     if (change === "root") assert.equal(existsSync(join(old, LOCK)), true);
@@ -1144,15 +1160,30 @@ test("directory replacement during a failed body write cannot unlink a replaceme
   rotation(f);
   const file = join(f.dir, "cut-1-11111111.txt");
   const old = join(f.base, "old");
+  let replacementBlocked = false;
   assert.throws(() => writeShadowFile(file, "private payload", { runner({ kind }) {
     if (kind === "file") {
-      renameSync(f.dir, old);
+      try { renameSync(f.dir, old); } catch (error) {
+        assert.equal(process.platform, "win32");
+        assert.ok(["EPERM", "EACCES", "EBUSY"].includes(error.code));
+        replacementBlocked = true;
+        throw error;
+      }
       mkdirSync(f.dir);
       writeFileSync(file, "replacement");
       mkdirSync(join(f.dir, LOCK));
     }
     return true;
-  } }, { root: f.dir }), (error) => error.code === "ESHADOWBUSY");
+  } }, { root: f.dir }), (error) => replacementBlocked
+    ? error.code === "ESHADOWACCESS" && ["EPERM", "EACCES", "EBUSY"].includes(error.cause?.code)
+    : error.code === "ESHADOWBUSY");
+  if (replacementBlocked) {
+    assert.equal(existsSync(old), false);
+    assert.equal(existsSync(file), false, "failed initial body must be removed from the unchanged root");
+    assert.equal(existsSync(join(f.dir, LOCK)), false);
+    assert.equal(statSync(backup(f, 120).file).size, 120);
+    return;
+  }
   assert.equal(readFileSync(file, "utf8"), "replacement");
   assert.equal(existsSync(join(f.dir, LOCK)), true);
   assert.equal(existsSync(join(old, LOCK)), true);
@@ -1271,7 +1302,11 @@ for (const kind of ["default", "shared", "dedicated"]) {
     await a.take("ready");
     assert.equal((await a.request("calibrate")).result.used, 600);
     a.proc.send({ command: "crash" });
-    assert.equal((await a.exit)[1], "SIGKILL");
+    const [exitCode, signal] = await a.exit;
+    if (process.platform === "win32") {
+      assert.equal(signal, null, "Windows reports force-termination through the exit code");
+      assert.ok(Number.isInteger(exitCode) && exitCode !== 0);
+    } else assert.equal(signal, "SIGKILL");
     assert.throws(() => process.kill(a.proc.pid, 0), (error) => error.code === "ESRCH");
     const lock = join(f.dir, LOCK);
     const fence = readFileSync(lock, "utf8");
