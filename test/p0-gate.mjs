@@ -188,26 +188,23 @@ check("p0-1 windows plan replaces the complete protected DACL", () => {
     "*S-1-5-32-544:(OI)(CI)F",
   ]);
 
-  assert.equal(
-    plan.sddl,
-    `D:P(A;OICI;FA;;;${sid})` +
-      "(A;OICI;FA;;;SY)" +
-      "(A;OICI;FA;;;BA)",
-  );
+  assert.deepEqual(shadowAccessPlan("win32", sid, "file").grant, [
+    `*${sid}:F`,
+    "*S-1-5-18:F",
+    "*S-1-5-32-544:F",
+  ]);
 });
 
-check("p0-1 windows default runner restores the generated ACL", () => {
+check("p0-1 windows default runner applies the restrictive ACL", () => {
   const sid = "S-1-5-21-100-200-300-1001";
   const target = join(tmpdir(), "spine-p0-windows", "session");
 
   for (const kind of ["dir", "file"]) {
     const calls = [];
-    let aclBody = "";
     const execFile = (file, args) => {
       calls.push({ file, args: [...args] });
-      if (file === "whoami.exe") return `"DESKTOP\\p0","${sid}"`;
+      if (file === "whoami.exe") return `"DESKTOP\p0","${sid}"`;
       assert.equal(file, "icacls.exe");
-      aclBody = readFileSync(args[2], "utf16le");
       return "";
     };
 
@@ -221,17 +218,12 @@ check("p0-1 windows default runner restores the generated ACL", () => {
     assert.equal(calls[0].file, "whoami.exe");
     assert.deepEqual(calls[0].args, ["/user", "/fo", "csv", "/nh"]);
     assert.equal(calls[1].file, "icacls.exe");
-    assert.equal(calls[1].args.includes("/restore"), true);
     assert.deepEqual(calls[1].args, [
-      dirname(resolve(target)),
-      "/restore",
-      calls[1].args[2],
-      "/q",
+      resolve(target),
+      "/inheritance:r",
+      "/grant:r",
+      ...shadowAccessPlan("win32", sid, kind).grant,
     ]);
-    assert.deepEqual(
-      aclBody.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line !== ""),
-      [basename(resolve(target)), shadowAccessPlan("win32", sid).sddl],
-    );
   }
 });
 

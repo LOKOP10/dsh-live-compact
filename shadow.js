@@ -15,18 +15,15 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
   renameSync,
-  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 const PLUGIN_NAME = /^(?:(?:cut|official|shadow)-\d+-[0-9a-f]{8}|raw-[0-9a-f]{16}|\d+-[0-9a-f]{8}-[0-9a-f]{8}|\d+-[0-9a-f]{8,16})\.txt$/;
@@ -188,25 +185,25 @@ export function recordCutStats(dir, { saved = 0, rewrite = 0 } = {}) {
   }
 }
 
-export function shadowAccessPlan(platform = process.platform, userSid = "") {
+export function shadowAccessPlan(platform = process.platform, userSid = "", kind = "dir") {
   if (platform === "win32") {
     if (!/^S-\d+(?:-\d+)+$/.test(userSid)) {
       throw new Error("spine: current Windows user SID is required");
     }
+
+    // 文件不能带继承标志，否则 icacls 会把整条 ACE 当无效丢掉，留下空 DACL。
+    // Files reject (OI)(CI), so a file grant must not carry it.
+    const scope = kind === "dir" ? "(OI)(CI)" : "";
 
     return {
       kind: "acl",
       usesChmodOnly: false,
       inheritance: "remove",
       grant: [
-        `*${userSid}:(OI)(CI)F`,
-        "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F",
+        `*${userSid}:${scope}F`,
+        `*S-1-5-18:${scope}F`,
+        `*S-1-5-32-544:${scope}F`,
       ],
-      sddl:
-        `D:P(A;OICI;FA;;;${userSid})` +
-        "(A;OICI;FA;;;SY)" +
-        "(A;OICI;FA;;;BA)",
     };
   }
 
@@ -235,29 +232,14 @@ export function defaultShadowAccessRunner({ path, kind, platform, execFile = exe
     throw new Error("spine: cannot determine current Windows user SID");
   }
 
-  const plan = shadowAccessPlan("win32", match[1]);
-  const target = resolve(path);
-  const temp = mkdtempSync(join(tmpdir(), "spine-acl-"));
+  const plan = shadowAccessPlan("win32", match[1], kind);
+  execFile(
+    "icacls.exe",
+    [resolve(path), "/inheritance:r", "/grant:r", ...plan.grant],
+    { stdio: "pipe", windowsHide: true },
+  );
 
-  try {
-    const aclFile = join(temp, "access.acl");
-    const aclBody = `\ufeff${basename(target)}\r\n${plan.sddl}\r\n`;
-
-    writeFileSync(aclFile, Buffer.from(aclBody, "utf16le"), {
-      flag: "wx",
-      mode: 0o600,
-    });
-
-    execFile(
-      "icacls.exe",
-      [dirname(target), "/restore", aclFile, "/q"],
-      { stdio: "pipe", windowsHide: true },
-    );
-
-    return true;
-  } finally {
-    rmSync(temp, { recursive: true, force: true });
-  }
+  return true;
 }
 
 export function tightenShadow(path, kind = "dir", access = {}) {
