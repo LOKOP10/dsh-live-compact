@@ -129,7 +129,7 @@ export function captureToolResult(options) {
       return captureToolResultLocked({ ...options, root });
     });
   } catch (error) {
-    if (!entered || error?.code === "ESHADOWBUSY") return { ok: false, reason: "unwritable", toolCallId };
+    if (!entered || error?.code === "ESHADOWBUSY") return { ok: false, reason: "unwritable", toolCallId, retryable: error?.code === "ESHADOWBUSY" };
     throw error; // In particular, preserve exceptions from failed raw cleanup.
   }
 }
@@ -206,7 +206,7 @@ function captureToolResultLocked({
       return readProtectedExisting();
     }
 
-    return { ok: false, reason: "unwritable", toolCallId };
+    return { ok: false, reason: "unwritable", toolCallId, retryable: error?.code === "ESHADOWBUSY" };
   }
 }
 

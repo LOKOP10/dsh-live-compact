@@ -132,6 +132,171 @@ test("failed record flush never publishes a partial lock or runs the action", (t
   assert.equal(readdirSync(f.dir).some((name) => name.endsWith(".tmp")), false);
 });
 
+test("temp cleanup failure after publication retains ownership, releases the lock and permits the next rotation/write", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  let failed = false;
+  withFsMock(t, "unlinkSync", (unlink) => (file) => {
+    if (!failed && String(file).startsWith(join(f.dir, LOCK)) && String(file).endsWith(".tmp")) {
+      failed = true;
+      throw Object.assign(new Error("temporary cleanup denied"), { code: "EACCES" });
+    }
+    return unlink(file);
+  }, () => {
+    assert.equal(rotation(f).ok, true);
+    assert.equal(failed, true);
+    assert.equal(existsSync(join(f.dir, LOCK)), false);
+    assert.equal(statSync(backup(f, 120).file).size, 120);
+    assert.equal(rotation(f).used, 120);
+  });
+  assert.equal(existsSync(join(f.dir, LOCK)), false);
+});
+
+test("temp cleanup cannot transfer ownership to a replacement lock or cause its removal", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const lock = join(f.dir, LOCK);
+  const replacement = holder(process.pid, "b".repeat(48));
+  withFsMock(t, "unlinkSync", (unlink) => (file) => {
+    if (String(file).startsWith(lock) && String(file).endsWith(".tmp")) {
+      renameSync(lock, join(f.base, "original-lock"));
+      writeFileSync(lock, replacement);
+      throw Object.assign(new Error("temporary cleanup denied"), { code: "EACCES" });
+    }
+    return unlink(file);
+  }, () => {
+    assert.throws(() => withShadowRoot(f.dir, () => assert.fail("replacement admitted")), (error) => error.code === "ESHADOWBUSY");
+  });
+  assert.equal(readFileSync(lock, "utf8"), replacement);
+});
+
+for (const [kind, code] of [["default", "ENOTSUP"], ["shared", "EOPNOTSUPP"], ["dedicated", "ENOSYS"]]) {
+  test(`${kind} root with link ${code} uses durable shared full scans and real raw/cut/official writes`, (t) => {
+    const f = fixture(t);
+    if (kind === "default") {
+      f.dir = join(f.base, "home", "compaction-spine", "shadow");
+      mkdirSync(f.dir, { recursive: true });
+    }
+    configure(t, f, kind === "dedicated");
+    if (kind === "default") delete process.env.SPINE_SHADOW_DIR;
+    plant(f, "cut-1-11111111.txt", 600);
+    withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("hardlinks unsupported"), { code }); }, () => {
+      for (let i = 0; i < 2; i++) assert.equal(rotation(f).estimated, undefined);
+      const raw = captureOwnedToolResult({ dir: join(f.dir, "B"), root: f.dir, toolCallId: "B", text: "b".repeat(320) });
+      assert.equal(raw.ok, true);
+      assert.equal(readFileSync(raw.path, "utf8"), "b".repeat(320));
+      assert.equal(JSON.parse(readFileSync(`${raw.path}.meta.json`, "utf8")).bytes, 320);
+      assert.equal(statSync(backup(f, 120).file).size, 120);
+      assert.equal(rotation(f).used, 440);
+      assert.equal(statSync(backup(f, 120, { kind: "official" }).file).size, 120);
+      assert.equal(rotation(f).used, 560);
+    });
+    assert.equal(existsSync(join(f.dir, SHARED)), true);
+    assert.equal(existsSync(join(f.dir, OWNER)), false);
+    assert.equal(existsSync(join(f.dir, LOCK)), false);
+    assert.equal(rotation(f).estimated, undefined, "restored hardlinks must not restore exclusive estimates");
+  });
+}
+
+for (const code of ["EPERM", "EACCES", "EIO", "EXDEV", "EINVAL"]) {
+  test(`link ${code} is ambiguous and never bypasses coordination`, (t) => {
+    const f = fixture(t);
+    configure(t, f, false);
+    withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("link failed"), { code }); }, () => {
+      assert.throws(() => withShadowRoot(f.dir, () => assert.fail("ambiguous link error admitted")), (error) => error.code === "ESHADOWBUSY");
+    });
+  });
+}
+
+test("ENOTSUP from a record flush is not proof of unsupported hardlinks", (t) => {
+  const f = fixture(t);
+  configure(t, f, false);
+  withFsMock(t, "fsyncSync", () => () => { throw Object.assign(new Error("flush unsupported"), { code: "ENOTSUP" }); }, () => {
+    assert.throws(() => withShadowRoot(f.dir, () => assert.fail("unflushed record admitted")), (error) => error.code === "ESHADOWBUSY");
+  });
+});
+
+for (const kind of ["live", "EPERM", "EACCES", "unknown PID", "directory", "malformed", "unreadable"]) {
+  test(`unsupported links still refuse ${kind} holders after persisting the shared fence`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    const lock = join(f.dir, LOCK);
+    if (kind === "directory") mkdirSync(lock);
+    else writeFileSync(lock, kind === "malformed" ? "{" : holder());
+    if (["EPERM", "EACCES", "unknown PID"].includes(kind)) t.mock.method(process, "kill", () => {
+      throw Object.assign(new Error("death unknown"), { code: kind === "unknown PID" ? undefined : kind });
+    });
+    withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("no hardlinks"), { code: "ENOTSUP" }); }, () => {
+      withFsMock(t, "openSync", (open) => (file, ...args) => {
+        if (kind === "unreadable" && String(file) === lock) throw Object.assign(new Error("holder unreadable"), { code: "EACCES" });
+        return open(file, ...args);
+      }, () => {
+        assert.throws(() => withShadowRoot(f.dir, () => assert.fail("possible exclusive holder bypassed")), (error) => error.code === "ESHADOWBUSY");
+      });
+    });
+    assert.equal(existsSync(lock), true);
+    assert.equal(existsSync(join(f.dir, SHARED)), true);
+    assert.equal(existsSync(join(f.dir, RECOVERED)), false);
+  });
+}
+
+for (const stage of ["flush denied", ...(process.platform === "win32" ? [] : ["directory flush denied"]), "holder appears", "fence replaced"]) {
+  test(`unsupported-link fallback checks its durable fence before action: ${stage}`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("no hardlinks"), { code: "ENOTSUP" }); }, () => {
+      withFsMock(t, "fsyncSync", (sync) => (fd) => {
+        const shared = join(f.dir, SHARED);
+        if (stage === "directory flush denied" && fs.fstatSync(fd).isDirectory()) throw new Error("directory flush failed");
+        if (existsSync(shared) && statSync(shared).ino === fs.fstatSync(fd).ino) {
+          if (stage === "flush denied") throw new Error("shared fence flush failed");
+          if (stage === "holder appears") writeFileSync(join(f.dir, LOCK), holder());
+          if (stage === "fence replaced") {
+            renameSync(shared, join(f.base, "original-fence"));
+            writeFileSync(shared, "");
+          }
+        }
+        return sync(fd);
+      }, () => {
+        assert.throws(() => withShadowRoot(f.dir, () => assert.fail("unsafe fallback action")), (error) => error.code === "ESHADOWBUSY");
+      });
+    });
+  });
+}
+
+test("unsupported links recover a proven-dead exact token durably, retain its lock and tolerate later PID reuse", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const lock = join(f.dir, LOCK);
+  const text = holder();
+  writeFileSync(lock, text);
+  const inode = statSync(lock).ino;
+  withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("no hardlinks"), { code: "ENOTSUP" }); }, () => {
+    const probe = t.mock.method(process, "kill", () => { throw Object.assign(new Error("dead"), { code: "ESRCH" }); });
+    assert.equal(rotation(f).estimated, undefined);
+    probe.mock.restore();
+    assert.equal(statSync(backup(f, 120).file).size, 120);
+    assert.equal(rotation(f).used, 120);
+  });
+  assert.equal(readFileSync(lock, "utf8"), text);
+  assert.equal(statSync(lock).ino, inode);
+  assert.equal(rotation(f).estimated, undefined, "hardlink-capable participants also recognize the recovered token");
+});
+
+test("unsupported-link fallback preserves a transaction appearing after admission and refuses its own write", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const lock = join(f.dir, LOCK);
+  withFsMock(t, "linkSync", () => () => { throw Object.assign(new Error("no hardlinks"), { code: "ENOTSUP" }); }, () => {
+    assert.throws(() => withShadowRoot(f.dir, () => {
+      writeFileSync(lock, holder());
+      writeShadowFile(join(f.dir, "cut-1-11111111.txt"), "refused", {}, { root: f.dir });
+    }), (error) => error.code === "ESHADOWBUSY");
+  });
+  assert.equal(readFileSync(lock, "utf8"), holder());
+  assert.equal(existsSync(join(f.dir, "cut-1-11111111.txt")), false);
+});
+
 for (const kind of ["old directory", "empty", "truncated", "oversized", "invalid PID", "extra field", "live or reused PID"]) {
   test(`${kind} lock fails closed regardless of age; metadata reads are bounded`, (t) => {
     const f = fixture(t);

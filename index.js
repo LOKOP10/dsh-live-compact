@@ -845,7 +845,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       }
       const message = error instanceof Error ? error.message : String(error);
       this.ctx?.logger?.warn?.(`spine: raw backup failed: ${message}`);
-      const record = { ok: false, reason: "unwritable", toolCallId: id };
+      const record = { ok: false, reason: "unwritable", toolCallId: id, retryable: error?.code === "ESHADOWBUSY" };
       this.rawSeen.set(mapKey, record);
       return record;
     }
@@ -871,7 +871,15 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     let cursor = this.captureCursor.has(key) ? this.captureCursor.get(key) : this.readCaptureCursor(key);
     if (cursor == null) cursor = restartCaptureCursor(events, settings.keepRounds);
     if (!Number.isSafeInteger(cursor) || cursor < 0 || events.length < cursor) cursor = restartCaptureCursor(events, settings.keepRounds);
+    // A live event callback may have failed before the recent-three restart
+    // boundary. Keep those visible originals eligible without replaying history.
+    for (const seq of session?.surface?.nodes || []) {
+      const event = session.eventAt?.(seq);
+      const id = event?.type === "tool/result" && event.data?.message?.toolCallId;
+      if (id && this.rawSeen.get(this.rawKey(session, id))?.retryable) cursor = Math.min(cursor, seq);
+    }
     let next = cursor;
+    let retry = null;
     const seen = new Set();
     for (const event of events) {
       const seq = Number.isInteger(event?.seq) ? event.seq : next;
@@ -881,11 +889,16 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const id = event.data?.message?.toolCallId;
         if (id && !seen.has(id)) {
           seen.add(id);
-          this.captureOne(session, event);
+          const cached = this.rawSeen.get(this.rawKey(session, id));
+          const record = cached && !cached.retryable ? cached : this.captureOne(session, event);
+          if (record?.retryable && retry === null) retry = seq;
         }
       }
       next = seq + 1;
     }
+    // Scanning later events is useful, but is not proof of a successful backup.
+    // Their completed records stay cached while the first busy result is retried.
+    next = retry ?? next;
     this.captureCursor.set(key, next);
     this.writeCaptureCursor(key, next);
     this.recoverVisibleRaw(session);
@@ -964,8 +977,18 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
 
   rawVerifiedSet(session) {
     const ids = new Set();
+    const dir = sessionDir(shadowDirectory(), session?.id || DEFAULT_KEY);
     for (const id of this.surfaceToolIds(session)) {
-      if (verifiedRaw(this.rawSeen.get(this.rawKey(session, id))).ok) ids.add(id);
+      const cached = this.rawSeen.get(this.rawKey(session, id));
+      if (!cached?.ok) continue;
+      try {
+        // Recheck both files immediately before prune, retaining the first
+        // trusted hash rather than blessing a replacement raw/meta pair.
+        const stored = readRawToolResult({ dir, toolCallId: id });
+        if (stored.ok && stored.path === cached.path && stored.sha256 === cached.sha256 && stored.bytes === cached.bytes) ids.add(id);
+      } catch (error) {
+        noteShadowWarning(this.ctx?.logger, error);
+      }
     }
     return ids;
   }

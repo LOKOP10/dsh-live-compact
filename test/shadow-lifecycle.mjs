@@ -10,6 +10,84 @@ import { contentHash, pointerFor, PRUNE_MARKER, rawName } from "../raw.js";
 import { sessionDir } from "../shadow.js";
 import { fixture, runtime } from "./helpers/runtime.mjs";
 
+test("guarded prune retries the first busy result, caches later captures and publishes only safe cursor progress", (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine, ctx } = h.engine();
+  engine.writeCaptureCursor(f.session.id, 0);
+  const lock = join(h.root, ".spine-rotation.lock");
+  writeFileSync(lock, `${JSON.stringify({ v: 1, pid: process.pid, id: "a".repeat(48) })}\n`);
+  const captures = [];
+  const capture = engine.captureOne.bind(engine);
+  engine.captureOne = (session, event) => {
+    const id = event.data.message.toolCallId;
+    captures.push(id);
+    const record = capture(session, event);
+    if (id === "long" && record.retryable) unlinkSync(lock);
+    return record;
+  };
+  engine.ensurePruneGuard();
+  const before = JSON.stringify(f.session.snapshotEvents());
+  ctx.toolResultPruner.pruneSession(f.session);
+  assert.equal(h.pruneCalls, 0);
+  assert.equal(JSON.stringify(f.session.snapshotEvents()), before);
+  assert.equal(engine.captureCursor.get(f.session.id), f.longRound[1]);
+  assert.equal(engine.readCaptureCursor(f.session.id), f.longRound[1]);
+  assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long")).retryable, true);
+  assert.equal(existsSync(join(sessionDir(h.root, f.session.id), rawName("long"))), false);
+  assert.deepEqual(captures, ["long", "short-0", "short-1", "short-2"]);
+  for (const id of ["short-0", "short-1", "short-2"]) {
+    const raw = engine.rawSeen.get(engine.rawKey(f.session, id));
+    assert.equal(raw.ok, true);
+    assert.equal(existsSync(`${raw.path}.meta.json`), true);
+  }
+  const scanned = [];
+  const note = engine.noteEvent.bind(engine);
+  engine.noteEvent = (session, event) => { scanned.push(event.seq); note(session, event); };
+  ctx.toolResultPruner.pruneSession(f.session);
+  assert.equal(h.pruneCalls, 1);
+  assert.deepEqual(captures, ["long", "short-0", "short-1", "short-2", "long"]);
+  assert.deepEqual(scanned, f.session.snapshotEvents().filter((event) => event.seq >= f.longRound[1]).map((event) => event.seq));
+  assert.equal(engine.readCaptureCursor(f.session.id), f.session.snapshotEvents().length);
+  const raw = engine.rawSeen.get(engine.rawKey(f.session, "long"));
+  const meta = JSON.parse(readFileSync(`${raw.path}.meta.json`, "utf8"));
+  assert.equal(raw.ok, true);
+  assert.equal(meta.sha256, contentHash(readFileSync(raw.path)));
+  assert.equal(meta.bytes, statSync(raw.path).size);
+  assert.equal(meta.toolCallId, "long");
+});
+
+test("a visible busy live event before the recent-three boundary is retried after the lock clears", (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine, ctx } = h.engine();
+  const lock = join(h.root, ".spine-rotation.lock");
+  writeFileSync(lock, `${JSON.stringify({ v: 1, pid: process.pid, id: "a".repeat(48) })}\n`);
+  assert.equal(engine.captureOne(f.session, f.session.eventAt(f.longRound[1])).retryable, true);
+  unlinkSync(lock);
+  engine.ensurePruneGuard();
+  ctx.toolResultPruner.pruneSession(f.session);
+  assert.equal(h.pruneCalls, 1);
+  assert.equal(engine.rawSeen.get(engine.rawKey(f.session, "long")).ok, true);
+  assert.equal(engine.readCaptureCursor(f.session.id), f.session.snapshotEvents().length);
+});
+
+test("unsupported hardlinks still publish protected atomic capture cursors and permit guarded prune", (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine, ctx } = h.engine();
+  const mock = t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("no hardlinks"), { code: "ENOTSUP" }); });
+  syncBuiltinESMExports();
+  try {
+    engine.writeCaptureCursor(f.session.id, 0);
+    engine.ensurePruneGuard();
+    ctx.toolResultPruner.pruneSession(f.session);
+    assert.equal(h.pruneCalls, 1);
+    assert.equal(engine.readCaptureCursor(f.session.id), f.session.snapshotEvents().length);
+    assert.equal(JSON.parse(readFileSync(engine.captureCursorFile(f.session.id), "utf8")).key, f.session.id);
+  } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+});
+
 test("restart restores visible raw references before guarded prune and a real local cut", async (t) => {
   const h = runtime(t);
   const f = h.use(fixture());
@@ -62,6 +140,25 @@ const damageCases = {
   },
 };
 for (const [name, damage] of Object.entries(damageCases)) {
+  test(`guarded prune revalidates cached raw/meta after ${name} without overwriting damage`, (t) => {
+    const h = runtime(t);
+    const f = h.use(fixture());
+    const { engine, ctx } = h.engine();
+    h.capture(engine, f);
+    const raw = engine.rawSeen.get(engine.rawKey(f.session, "long"));
+    const changed = damage(raw.path, JSON.parse(readFileSync(`${raw.path}.meta.json`, "utf8")));
+    if (changed && typeof changed === "object") writeFileSync(`${raw.path}.meta.json`, JSON.stringify(changed));
+    const before = JSON.stringify(f.session.snapshotEvents());
+    let captures = 0;
+    engine.captureOne = () => { captures++; throw new Error("completed capture must not be replayed"); };
+    engine.ensurePruneGuard();
+    ctx.toolResultPruner.pruneSession(f.session);
+    assert.equal(h.pruneCalls, 0);
+    assert.equal(captures, 0);
+    assert.equal(JSON.stringify(f.session.snapshotEvents()), before);
+    assert.equal(engine.readCaptureCursor(f.session.id), f.session.snapshotEvents().length);
+  });
+
   test(`restart refuses ${name}, leaves the surface intact, and the next session works`, async (t) => {
     const h = runtime(t);
     const f = h.use(fixture());
@@ -96,6 +193,20 @@ for (const [name, damage] of Object.entries(damageCases)) {
     assert.equal(healthy.summaries().length, 1);
   });
 }
+
+test("guarded prune does not trust a replacement raw/meta pair over the first captured hash", (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine, ctx } = h.engine();
+  h.capture(engine, f);
+  const raw = engine.rawSeen.get(engine.rawKey(f.session, "long"));
+  const body = "substituted text";
+  writeFileSync(raw.path, body);
+  writeFileSync(`${raw.path}.meta.json`, JSON.stringify({ toolCallId: "long", sha256: contentHash(body), bytes: Buffer.byteLength(body) }));
+  engine.ensurePruneGuard();
+  ctx.toolResultPruner.pruneSession(f.session);
+  assert.equal(h.pruneCalls, 0);
+});
 
 test("recovery reads exact visible IDs, never enumerates backups or recaptures skipped history", (t) => {
   const h = runtime(t);
