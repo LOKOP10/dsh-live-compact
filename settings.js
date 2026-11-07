@@ -28,6 +28,9 @@ export const ENV = Object.freeze({
   cooldownMs: "SPINE_COOLDOWN_MS",
 });
 
+// volatile 字段的现值是 cosmokit 的取值对象，读之前先摊平。
+const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
+
 /** stock 引擎自己的字段。多给一个键它就直接报 unknown key，所以传给引擎前要摘出来。 */
 export const ENGINE_KEYS = Object.freeze([
   "auto",
@@ -39,15 +42,12 @@ export const ENGINE_KEYS = Object.freeze([
 
 export function engineConfig(config = {}) {
   const next = {};
-  for (const key of ENGINE_KEYS) if (config?.[key] !== undefined) next[key] = config[key];
+  for (const key of ENGINE_KEYS) if (config?.[key] !== undefined) next[key] = plain(config[key]);
   return next;
 }
 
 /** 运行期现值。引擎构造时写入一次，plan 侧按需读。 */
 export const settings = { ...DEFAULTS };
-
-// volatile 字段的现值是 cosmokit 的取值对象，读之前先摊平。
-const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
 
 const finite = (value) => {
   const number = Number(plain(value));
