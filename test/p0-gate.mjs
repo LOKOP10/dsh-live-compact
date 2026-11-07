@@ -37,6 +37,8 @@ import {
   win32Tool,
   writeShadowOwner,
 } from "../shadow.js";
+import { DEFAULTS, readSettings } from "../settings.js";
+import shellEntry from "../shell.js";
 
 const failures = [];
 
@@ -714,12 +716,12 @@ check("p0-15 source has no SPINE_MAX_TOKENS", () => {
   }
 });
 
-check("p0-15 BIG_GATE stays 650000 with SPINE_MAX_TOKENS=1", () => {
-  const moduleURL = new URL("../index.js", import.meta.url).href;
+check("p0-15 bigGate stays 650000 with SPINE_MAX_TOKENS=1", () => {
+  const moduleURL = new URL("../settings.js", import.meta.url).href;
   const output = execFileSync(process.execPath, [
     "--input-type=module",
     "--eval",
-    `const { BIG_GATE } = await import(${JSON.stringify(moduleURL)}); process.stdout.write(String(BIG_GATE));`,
+    `const { DEFAULTS } = await import(${JSON.stringify(moduleURL)}); process.stdout.write(String(DEFAULTS.bigGate));`,
   ], {
     encoding: "utf8",
     env: { ...process.env, SPINE_MAX_TOKENS: "1" },
@@ -785,6 +787,25 @@ check("p0-16 only adapter.js imports a DSH package", () => {
 
 check("p0-16 package ships adapter.js", () => {
   assert.equal(packageJson.files.includes("adapter.js"), true);
+});
+
+check("p0-17 settings schema owns the plugin knobs", () => {
+  const shape = shellEntry.Config({});
+  const knobs = ["minTokens", "keepRounds", "keepRoundTokens", "pointerTokens", "chunkMin", "chunkMax", "bigGate", "cooldownMs"];
+  for (const key of knobs) assert.equal(shape[key], DEFAULTS[key], key);
+  for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainRatio", "retainTokens", "compactionRetries"]) {
+    assert.equal(key in shape, true, key);
+  }
+});
+
+check("p0-17 config beats env beats default", () => {
+  const env = { SPINE_MIN_TOKENS: "9000", SPINE_CHUNK_MIN: "500" };
+  assert.equal(readSettings({}, env).minTokens, 9000);
+  assert.equal(readSettings({ minTokens: 1234 }, env).minTokens, 1234);
+  assert.equal(readSettings({}, {}).minTokens, DEFAULTS.minTokens);
+  assert.equal(readSettings({}, {}).pointerTokens, DEFAULTS.chunkMax);
+  assert.equal(readSettings({ chunkMax: 40000 }, {}).pointerTokens, 40000);
+  assert.equal(readSettings({ chunkMax: 40000, pointerTokens: 7000 }, {}).pointerTokens, 7000);
 });
 
 if (failures.length) {

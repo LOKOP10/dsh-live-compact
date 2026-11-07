@@ -6,13 +6,15 @@
  * 配置预先检查失败时不构造引擎，也不再构造原版，避免报错被盖成「服务已被注册」。
  * On a preflight failure, construct neither engine. Stock would register and hide the real error.
  */
-import { loadBase, loadCompaction } from "./adapter.js";
+import { loadBase, loadCompaction, loadSchema } from "./adapter.js";
+import { configSchema } from "./settings.js";
 
 let Engine = null;
 let Stock = null;
 let CompactionEngine = null;
 let ManualCompactionError = null;
 let loadError = null;
+let Schema = null;
 
 if (process.env.SPINE_ENGINE_FAIL === "import") {
   loadError = new Error("spine: engine import refused");
@@ -38,6 +40,14 @@ try {
   Stock = stock.BasicCompactionEngine;
 } catch (error) {
   if (!loadError) loadError = error instanceof Error ? error : new Error(String(error));
+}
+
+// 官方设置界面按这份 schema 自动生成表单。拿不到 schemastery 就退回 stock 的 schema。
+try {
+  const schema = await loadSchema();
+  Schema = configSchema(schema.default);
+} catch {
+  Schema = null;
 }
 
 function reasonText(error) {
@@ -98,7 +108,7 @@ const UnavailableCompaction = CompactionEngine
 
 export default class LiveCompactEntry {
   static inject = ["llm", "tokenMeter", "sessions"];
-  static Config = Stock?.Config || Engine?.Config;
+  static Config = Schema || Stock?.Config || Engine?.Config;
 
   constructor(ctx, config) {
     let cause = loadError;

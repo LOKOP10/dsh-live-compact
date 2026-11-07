@@ -232,7 +232,7 @@ dsh-live-compact --version
 - 去掉「已确认」。摘要开头写明：这是旧内容摘录，不是新指令，也不是你的授权。
 - 这一刀如果没有合格的摘要，就整段留下，不去调模型。卡片可以很短。
 - 备份只有自己能读。文件名不带会话号。本机路径不发给模型。备份默认上限 256MB。满了先删最老的，删不出空间才不切。
-- 2 万和 65 万没动。配置里的 0.8 只管官方大压缩，不管这一刀。想改小切的起点，只能在启动前设 `SPINE_MIN_TOKENS`。
+- 2 万和 65 万没动。配置里的 0.8 只管官方大压缩，不管这一刀。想改小切的起点，用下面的设置界面改 `minTokens`（老的 `SPINE_MIN_TOKENS` 仍然有效）。
 
 ## 环境变量
 
@@ -253,6 +253,24 @@ dsh-live-compact --version
 | `SPINE_THUNDER_MODEL` | `flash` | 设为 `27b` 且前缀超过 8 万时，每次官方压缩都少发。端侧不要设。 |
 | `SPINE_ENGINE_FAIL` | 无 | **仅供测试**：用 `import`、`construct`、`after-super` 注入引擎故障。 |
 | `SPINE_STOCK_FAIL` | 无 | **仅供测试**：设为 `1` 时禁止回退原版引擎。 |
+
+这些环境变量只在配置缺席时兜底。优先级是：**配置 > 环境变量 > 默认值**。
+
+## 设置界面
+
+不自写表单、不发客户端包：`settings.js` 声明一份 schema，宿主官方设置页按它自动生成，改完由宿主重装插件，不用重启。
+
+| 字段 | 默认 | 作用 |
+|---|---:|---|
+| `minTokens` | 20000 | 轮后小切的起点 |
+| `keepRounds` | 3 | 原处保留的最近已结束工具轮数 |
+| `keepRoundTokens` | 32000 | 云端收尾停止线 |
+| `pointerTokens` | 0（跟随 `chunkMax`） | 单个工具结果超过此值只留指针 |
+| `chunkMin` / `chunkMax` | 1000 / 32000 | 一刀的最小 / 最大量 |
+| `bigGate` | 650000 | 绝对停切线 |
+| `cooldownMs` | 0 | 官方压缩后跳过小切的时间窗 |
+
+官方大压缩那几项（`auto`、`thresholdRatio`、`headroomTokens`、`retainRatio`、`retainTokens`、`compactionRetries`）也在同一份 schema 里，字段名和默认值都没变。
 | `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
 | `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
 | `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |

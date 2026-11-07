@@ -18,6 +18,7 @@
   "files": [
     "shell.js",
     "adapter.js",
+    "settings.js",
     "index.js",
     "gate.js",
     "plan.js",
@@ -47,7 +48,8 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-compaction": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/dsh-compaction-basic": ">=0.2.0-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0"
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-compaction": "0.2.0-rc.2",
