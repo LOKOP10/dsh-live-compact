@@ -16,6 +16,34 @@ const eventHash = (f) => contentHash(JSON.stringify(f.session.snapshotEvents()))
 const summaryText = (f) => f.summaries().map((event) => messageText({ content: event.data.summary })).join("\n");
 const checkpoints = (f, kind) => f.session.surface.nodes.filter((seq) => f.session.eventAt(seq)?.data?.source?.kind === kind);
 
+test("an incomplete capacity scan after selection preserves the real surface and later maintenance recovers", async (t) => {
+  const h = runtime(t);
+  const f = h.use(fixture());
+  const { engine } = h.engine();
+  h.capture(engine, f);
+  const old = `${h.root}/cut-9-11111111.txt`;
+  fs.writeFileSync(old, "x".repeat(900));
+  const canonicalOld = fs.realpathSync.native(old);
+  process.env.SPINE_SHADOW_MAX_BYTES = "1000";
+  const before = eventHash(f);
+  const original = fs.statSync;
+  const mock = t.mock.method(fs, "statSync", (path, ...args) => {
+    if (String(path) === canonicalOld) throw Object.assign(new Error("unreadable backup"), { code: "EACCES" });
+    return original(path, ...args);
+  });
+  syncBuiltinESMExports();
+  try { await engine.finishTurn(f.agent()); }
+  finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(eventHash(f), before);
+  assert.equal(f.summaries().length, 0);
+  assert.ok(h.warnings.some(line => line.includes("scan is incomplete")));
+  assert.equal(fs.statSync(old).size, 900);
+  process.env.SPINE_SHADOW_MAX_BYTES = "1000000";
+  await engine.finishTurn(f.agent());
+  assert.equal(f.summaries().length, 1, h.warnings.join("\n"));
+  assert.equal(h.modelCalls, 0);
+});
+
 test("positive local cut stays after latest user, preserves prefix bytes and the default three pairs", async (t) => {
   const h = runtime(t);
   const f = h.use(fixture({ long: { name: "shell" } }));

@@ -209,6 +209,17 @@ export function saveShadowImpl(
       });
 
       if (!rotation.ok) {
+        if (rotation.reason) {
+          const incomplete = rotation.reason === "scan-incomplete";
+          const error = Object.assign(new Error(incomplete
+            ? "spine: shadow capacity scan is incomplete; backup refused; leaving the span"
+            : "spine: shadow capacity measurement is invalid; backup refused; leaving the span"), {
+            code: incomplete ? "ESHADOWSCAN" : "ESHADOWMETER",
+          });
+          if (required) throw error;
+          this.ctx.logger?.warn?.(error.message);
+          return;
+        }
         this.warnShadowFull(warnKey, shadow, rotation.used, cap);
         if (required) {
           throw new Error(

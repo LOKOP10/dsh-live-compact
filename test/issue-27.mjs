@@ -637,12 +637,15 @@ test("a normal raw helper infers its configured root before the session director
   assert.equal(rotation(f).estimated, true);
 });
 
-for (const optIn of [false, true]) for (const failedPart of ["root readdir", "session readdir", "stat"]) {
+for (const optIn of [false, true]) for (const failedPart of ["root readdir", "session readdir", "root stat", "session stat"]) {
   test(`incomplete ${failedPart} refuses admission and never seeds an estimate (${optIn ? "dedicated" : "shared"})`, (t) => {
     const f = fixture(t);
     configure(t, f, optIn);
-    const file = plant(f, "dead/cut-1-11111111.txt", 900);
-    const bad = failedPart === "stat" ? { stat() { throw new Error("EACCES"); } } : {
+    const file = plant(f, failedPart === "root stat" ? "cut-1-11111111.txt" : "dead/cut-1-11111111.txt", 900);
+    const bad = failedPart.endsWith("stat") ? { stat(path) {
+      if (path === file) throw new Error("EACCES");
+      return f.io.stat(path);
+    } } : {
       readdir(path, options) {
         if ((failedPart === "root readdir" && path === f.dir) || (failedPart === "session readdir" && path !== f.dir)) throw new Error("EACCES");
         return f.io.readdir(path, options);
@@ -652,6 +655,7 @@ for (const optIn of [false, true]) for (const failedPart of ["root readdir", "se
       const failed = rotation(f, incoming, bad);
       assert.equal(failed.ok, false, "an unreadable payload cannot establish capacity, including the oversize exception");
       assert.equal(failed.failed, true);
+      assert.equal(failed.reason, "scan-incomplete");
       assert.equal(failed.estimated, undefined);
       assert.equal(failed.deleted, 0);
       assert.equal(failed.freed, 0);
@@ -666,27 +670,55 @@ for (const optIn of [false, true]) for (const failedPart of ["root readdir", "se
   });
 }
 
-for (const optIn of [false, true]) {
-  test(`failed capacity scan prevents a real 900 + 200 save at cap 1000 (${optIn ? "dedicated" : "shared"})`, (t) => {
+for (const optIn of [false, true]) for (const failedPart of ["root readdir", "session readdir", "root stat", "session stat"]) {
+  test(`failed capacity scan ${failedPart} prevents real required and optional 900 + 200 saves (${optIn ? "dedicated" : "shared"})`, (t) => {
     const f = fixture(t);
     configure(t, f, optIn);
-    const old = plant(f, "cut-9-11111111.txt", 900);
-    const originalStat = f.io.stat;
+    const old = plant(f, failedPart === "root stat" ? "cut-9-11111111.txt" : "dead/cut-9-11111111.txt", 900);
+    const originalIO = { ...f.io };
     f.io.stat = (path) => {
-      if (path === old) throw Object.assign(new Error("unreadable backup"), { code: "EACCES" });
-      return originalStat(path);
+      if (failedPart.endsWith("stat") && path === old) throw Object.assign(new Error("unreadable backup"), { code: "EACCES" });
+      return originalIO.stat(path);
     };
-    assert.throws(() => backup(f, 200), /backup is full/);
+    f.io.readdir = (path, options) => {
+      if ((failedPart === "root readdir" && path === f.dir) || (failedPart === "session readdir" && path === join(f.dir, "dead"))) {
+        throw Object.assign(new Error("unreadable directory"), { code: "EACCES" });
+      }
+      return originalIO.readdir(path, options);
+    };
+    assert.throws(() => backup(f, 200), (error) => error.code === "ESHADOWSCAN");
     assert.equal(existsSync(join(f.dir, "mine", "cut-1-aaaaaaaa.txt")), false);
+    const optional = backup(f, 200, { required: false, kind: "official" });
+    assert.equal(existsSync(optional.file), false);
     assert.equal(listShadowEntries(f.dir).reduce((sum, file) => sum + file.size, 0), 900);
     assert.deepEqual(f.calls.unlink, []);
-    f.io.stat = originalStat;
+    Object.assign(f.io, originalIO);
     const healthy = backup(f, 200);
     assert.equal(statSync(healthy.file).size, 200);
     assert.equal(existsSync(old), false);
     assert.equal(rotation(f).used, 200);
   });
 }
+
+test("invalid incoming, cap and observed sizes never authorize deletion or backup", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const file = plant(f, "cut-1-11111111.txt", 900);
+  const cases = [
+    ...[NaN, Infinity, -1, 0.5].map(incomingBytes => ({ incomingBytes })),
+    ...[NaN, Infinity, 0, -1, Number.MAX_SAFE_INTEGER + 1].map(cap => ({ cap })),
+    { stat(path) { const info = statSync(path); info.size = NaN; return info; } },
+  ];
+  for (const extra of cases) {
+    const { incomingBytes = 200, ...options } = extra;
+    const result = rotation(f, incomingBytes, options);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "invalid-measurement");
+    assert.equal(result.deleted, 0);
+    assert.equal(statSync(file).size, 900);
+  }
+  assert.deepEqual(f.calls.unlink, []);
+});
 
 test("original removal order, both protection forms, live owners, raw metadata and unrelated files are preserved", (t) => {
   const f = fixture(t);

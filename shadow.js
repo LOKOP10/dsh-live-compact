@@ -1132,6 +1132,7 @@ function rotateShadowLocked({
   if (exclusive && shadowUsage?.cap === cap && Number.isSafeInteger(incomingBytes) && incomingBytes >= 0 && !oversize && shadowUsage.bytes + incomingBytes < low) {
     return { ok: true, deleted: 0, freed: 0, used: shadowUsage.bytes, cap, oversize: false, failed: false, estimated: true };
   }
+  shadowUsage = null;
   let complete = true;
   const files = listShadowEntries(root, alive, { readdir, stat, onError() { complete = false; } });
   const protect = new Set([protectPath, ...protectPaths].filter(Boolean).map((path) => {
@@ -1146,7 +1147,11 @@ function rotateShadowLocked({
   // Refuse before deletion as well: a partial scan cannot establish a safe
   // rotation, even when the incoming backup qualifies for the oversize rule.
   if (!complete) {
-    return { ok: false, deleted: 0, freed: 0, used, cap, oversize, failed: true };
+    return { ok: false, deleted: 0, freed: 0, used, cap, oversize, failed: true, reason: "scan-incomplete" };
+  }
+  if (!validBytes) {
+    shadowUsage = null;
+    return { ok: false, deleted: 0, freed: 0, used, cap, oversize, failed: true, reason: "invalid-measurement" };
   }
   if (!oversize && used + incomingBytes <= cap) {
     return { ok: true, deleted: 0, freed: 0, used, cap, oversize: false, failed: false };
