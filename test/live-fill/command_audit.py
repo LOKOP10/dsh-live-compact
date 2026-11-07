@@ -6,7 +6,6 @@ receipts judge finals only and cannot waive these failures.
 """
 import ast
 import re
-import shlex
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 
@@ -107,7 +106,7 @@ def path_errors(value, turn, write=False, listing=False):
             (root / value).resolve().relative_to(root)
         except (TypeError, ValueError, OSError, RuntimeError):
             bad.append(OPAQUE)
-    candidates = policy_paths(value)
+    candidates = {path.lower() for path in policy_paths(value)}
     all_parts = [PurePosixPath(path).parts for path in candidates]
     if any('.env' in item for item in all_parts):
         bad.append('forbidden .env access')
@@ -193,8 +192,74 @@ def python_errors(source, turn):
     return bad
 
 
+class IONumber(str):
+    """An unquoted descriptor immediately adjacent to a redirection operator."""
+
+
+def bounded_shell_tokens(command):
+    # Ordinary words never become control operators after quote removal. This
+    # deliberately refuses operator-shaped literal words instead of guessing.
+    escape, single, double = chr(92), chr(39), chr(34)
+    newline = chr(10)
+    if escape + newline in command or any(ord(c) < 32 and c not in (chr(9), newline) for c in command.replace(STATUS, '')):
+        raise ValueError('unsupported continuation/control character')
+    operators = {';', '&', '&&', '||', '|', '>', '>>', '<', '>&', newline}
+    tokens, word = [], []
+    active, plain = False, True
+
+    def emit(io=False):
+        nonlocal active, plain
+        if active:
+            value = ''.join(word)
+            if value in operators:
+                raise ValueError('operator-shaped literal needs command review')
+            tokens.append(IONumber(value) if io and plain and value.isdigit() else value)
+        word.clear()
+        active, plain = False, True
+
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char in (' ', chr(9)):
+            emit(); index += 1
+        elif char == newline:
+            emit(); tokens.append(newline); index += 1
+        elif char == '#' and not active:
+            raise ValueError('shell comments need command review')
+        elif char in ';&|<>':
+            end = index + 1
+            while end < len(command) and command[end] in ';&|<>':
+                end += 1
+            operator = command[index:end]
+            emit(io=operator.startswith(('<', '>')))
+            tokens.append(operator); index = end
+        elif char in (single, double):
+            active, plain = True, False
+            quote = char; index += 1
+            while index < len(command) and command[index] != quote:
+                char = command[index]
+                if (quote == double and char == escape and index + 1 < len(command)
+                        and command[index+1] in (escape, double, '$', '`')):
+                    word.append(command[index+1]); index += 2
+                else:
+                    word.append(char); index += 1
+            if index == len(command):
+                raise ValueError('unterminated quote')
+            index += 1
+        elif char == escape:
+            active, plain = True, False
+            index += 1
+            if index == len(command):
+                raise ValueError('dangling escape')
+            word.append(command[index]); index += 1
+        else:
+            word.append(char); active = True; index += 1
+    emit()
+    return tokens
+
+
 def shell_words(command):
-    # shlex removes quotes, so reject active expansion *before* normalizing.
+    # Reject active expansion before bounded tokenization.
     # Single-quoted patterns/data stay literal, including regex end anchors.
     if '\x00' in command:
         raise ValueError('NUL')
@@ -221,11 +286,7 @@ def shell_words(command):
         elif (quote != "'" and char in '$`') or (quote is None and char in '~*?[]{}()'):
             raise ValueError('expansion')
         literal.append(char)
-    lexer = shlex.shlex(''.join(literal), posix=True, punctuation_chars=';&|<>\n')
-    lexer.whitespace = ' \t\r'
-    lexer.whitespace_split = True
-    lexer.commenters = ''
-    return list(lexer)
+    return bounded_shell_tokens(''.join(literal))
 
 
 def shell_errors(command, turn, depth=0):
@@ -289,7 +350,9 @@ def simple_audit(words, turn, depth, stdin_paths=UNBOUND_STDIN):
                     redirected_output = True
                 if token != '<' and target.endswith(('.py', '.sh')):
                     bad.append(OPAQUE)
-        elif token in ('0', '1', '2') and args and args[0] in ('>', '>>', '>&', '<'):
+        elif isinstance(token, IONumber):
+            if token not in ('0', '1', '2') or not args or args[0] not in ('>', '>>', '>&', '<'):
+                return bad + [OPAQUE], None
             if (token == '0') != (args[0] == '<'):
                 bad.append(OPAQUE)
             continue

@@ -676,6 +676,26 @@ class FullCellTests(unittest.TestCase):
             self.assertFalse(report['hard_quality_pass'])
             self.assertFalse(report['gate_pass'])
 
+    def test_shell_continuation_cannot_modify_and_restore_protected_file(self):
+        import shlex
+        old=(self.root/'work/spine-1/conf/settings.toml').read_text()
+        target='conf/set'+chr(92)+chr(10)+'tings.toml'
+        command="printf '%s' 'port = 1' > "+target+"; printf '%s' "+shlex.quote(old)+' > '+target
+        with self.injected_turn(14,[dict(tool='bash',input={'command':command})]) as report:
+            self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+            self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+            self.assertFalse(report['hard_quality_pass'])
+
+    def test_quoted_operator_filename_cannot_hide_csv_input(self):
+        csv='a,b'+chr(10)+'1,2'+chr(10)
+        calls=[dict(tool='write',input={'file_path':'>','content':''}),
+               dict(tool='write',input={'file_path':'sample.csv','content':csv}),
+               dict(tool='bash',input={'command':"rg -o '^[^,]+' '>' sample.csv part14.log"})]
+        with self.injected_turn(14,calls,{'>':'','sample.csv':csv}) as report:
+            self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+            self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+            self.assertFalse(report['hard_quality_pass'])
+
     def test_candidate_wrong_nonzero_stock_wrong_reported(self):
         for root in (self.root,self.stock):
             with self.bad_answer(root):

@@ -207,6 +207,15 @@ review. Finals-only semantic receipts cannot waive that failure; no review
 override is implemented. This is an accepted language, not a general shell
 sandbox or proof about arbitrary generated programs.
 
+The bounded shell tokenizer preserves the distinction between words and control
+operators. Backslash-newline continuations, unquoted comments, control characters
+and operator-shaped literal arguments (for example a quoted `>`) are rejected.
+Only an unquoted numeric word immediately adjacent to a redirection is an I/O
+descriptor; quoting it or separating it with whitespace leaves an ordinary
+argument. Protected paths are compared case-insensitively as a conservative rule
+on case-insensitive filesystems. Real Bash argv and filesystem regressions cover
+these distinctions, including modify-and-restore attempts before a snapshot.
+
 DSH glob accepts `pattern` and optional `path`. It enumerates names through
 fixed `rg --files` argv; it never provides content-read evidence. The bounded
 positive pattern language admits ASCII letters, digits, `_./-*?`, with no `..`

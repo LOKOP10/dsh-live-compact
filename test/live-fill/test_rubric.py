@@ -646,6 +646,7 @@ class ToolEvidenceTests(unittest.TestCase):
                 ('"rm" scratch', 'forbidden rm command'),
                 ('sh -c "rm scratch"', 'forbidden rm command'),
                 ('printf safe & "rm" scratch', 'forbidden rm command'),
+                ('printf safe;\n"rm" scratch', 'forbidden rm command'),
                 ('python -I -c "import pandas, tenacity"', 'forbidden package use: pandas'),
                 ("env command /bin/'rm' scratch", 'forbidden rm command'),
                 ("bash -lc 'sh -c \"rm scratch\"'", 'forbidden rm command'),
@@ -661,7 +662,7 @@ class ToolEvidenceTests(unittest.TestCase):
                         "python3 -I -c 'from pathlib import Path; print((Path(\".\") / \".env\").read_text())'",
                         "python3 -I -c 'from pathlib import Path; print(Path(\"safe\", \".env\").read_text())'",
                         'sed -n -e 1p -e "1e rm scratch" part14.log',
-                        'printf safe;\n"rm" scratch', 'echo hi <(rm scratch)',
+                        'echo hi <(rm scratch)',
                         'printf safe <> ".en""v"', 'cat <<EOF\nplain data\nEOF',
                         'env PATH=/tmp cat part14.log', 'cat $(printf .env)',
                         'cp --target-directory=vendor scratch', "rg WARN ."):
