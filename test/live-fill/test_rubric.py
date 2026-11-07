@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from contract import MANIFEST, NOTICE
+from contract import MANIFEST, NOTICE, sha
 from mkfx import write_workspace
 from rubric import behavior, check_activity, check_command, check_evidence, fields, fill_answer
 from command_audit import OPAQUE, tool_errors
@@ -705,24 +705,82 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertEqual(behavior(14, [{'tool':'read', 'input':{'file_path':'vendor/lib.py'}}],
                                   self.snapshot, self.initial), [])
 
-    def audit_turn14(self, command):
+    def audit_turn14(self, command, written_files=None):
         # Complete, correlated synthetic evidence with a correct canonical final.
         # Commands are inert log strings; never execute them or modify fixtures.
         items = events(14, self.cwd, 'sid')
-        items[5:5] = [dict(type='tool_call', callId='audit', tool='bash', input={
-            'command':command, 'description':'Synthetic audit regression', 'workdir':str(self.cwd)}),
-            dict(type='tool_result', callId='audit', status='completed', result='[exit code: 0]')]
+        extra = []
+        for index, text in enumerate([command] if isinstance(command, str) else command):
+            call_id = f'audit-{index}'
+            extra += [dict(type='tool_call', callId=call_id, tool='bash', input={
+                'command':text, 'description':'Synthetic audit regression', 'workdir':str(self.cwd)}),
+                dict(type='tool_result', callId=call_id, status='completed', result='[exit code: 0]')]
+        items[5:5] = extra
         parsed = self.parsed(items, 14)
         self.assertEqual(parsed['evidence_errors'], [])
         self.assertEqual(parsed['quality_errors'], [])
         self.assertEqual(parsed['tool_quality_errors'], [])
         self.assertTrue(parsed['expected_read'])
         self.assertEqual(parsed['fill_machine']['status'], 'RECOGNIZED')
-        return behavior(14, parsed['calls'], self.snapshot, self.initial, cwd=self.cwd)
+        snapshot = copy.deepcopy(self.snapshot)
+        for path, text in (written_files or {}).items():
+            snapshot['files'][path] = sha(text.encode())
+            snapshot['texts'][path] = text
+        return behavior(14, parsed['calls'], snapshot, self.initial, cwd=self.cwd)
+
+    def test_complete_turn14_rejects_descriptor_and_leading_slash_aliases(self):
+        for path in ('//dev/stdin', '//dev/fd/0', '///dev/stdin', '////dev/fd/0',
+                     '/./dev//stdin', '//dev/./stdin', '/dev/fd/0/.',
+                     '//proc/self/fd/0', '/proc//thread-self/fd/0', '//proc/123/fd/0',
+                     '//dev/stdout', '//dev/stderr', '//tmp/sample.csv'):
+            for prefix in ('', "printf 'a,b\\n1,2\\n' > sample.csv; "):
+                for command in (f"cat sample.csv | grep ',' {path}",
+                                f"grep ',' {path} < sample.csv"):
+                    with self.subTest(command=prefix+command):
+                        self.assertIn(OPAQUE, self.audit_turn14(prefix+command))
+        self.assertIn(OPAQUE, self.audit_turn14(
+            "python3 -c 'import csv; print(list(csv.reader(open(\"//dev/stdin\"))))' < sample.csv"))
+
+    def test_complete_turn14_rejects_csv_writes_copies_and_later_reads(self):
+        for command in (
+                'cat sample.csv > scratch.txt', 'cat sample.csv >> scratch.txt',
+                'head -n 1 sample.csv 1> scratch.txt', 'cat < sample.csv > scratch.txt',
+                'cat ./sample.CSV > scratch.txt', 'cat ./sample.csv/. > scratch.txt',
+                'cat sample.csv | sort | uniq -c > scratch.txt',
+                'cat sample.csv | env command cat > scratch.txt',
+                'env command cat sample.csv > scratch.txt',
+                "sh -c 'cat sample.csv' > scratch.txt",
+                "sh -c 'cat sample.csv > scratch.txt'",
+                "sh -c 'cat sample.csv; printf safe' > scratch.txt",
+                "python3 -c 'import csv; print(list(csv.reader(open(\"sample.csv\"))))' > scratch.txt",
+                'cp sample.csv scratch.txt', 'cp -- ./sample.csv ./scratch.txt',
+                'mv sample.csv scratch.txt', 'mv -- ./sample.csv ./scratch.txt',
+                'cat sample.csv | tee scratch.txt', 'sort -o scratch.txt sample.csv',
+                'uniq sample.csv scratch.txt'):
+            with self.subTest(command=command):
+                self.assertIn(OPAQUE, self.audit_turn14(command))
+        # Complete evidence includes the copied bytes, with the reader either in
+        # the same shell or a later call. Reject the writer without file tracking.
+        for writer in ('cat sample.csv > scratch.txt', 'cat sample.csv >> scratch.txt',
+                       'cp sample.csv scratch.txt', 'mv sample.csv scratch.txt'):
+            for prefix in ('', "printf 'a,b\\n1,2\\n' > sample.csv; "):
+                for commands in (prefix+writer+"; grep ',' < scratch.txt",
+                                 [prefix+writer, "grep ',' < scratch.txt"],
+                                 [prefix+writer, "grep ',' scratch.txt"],
+                                 [prefix+writer, "cat scratch.txt | grep ','"]):
+                    with self.subTest(commands=commands):
+                        self.assertIn(OPAQUE, self.audit_turn14(
+                            commands, written_files={'scratch.txt':'a,b\n1,2\n'}))
+        # An early-turn write must not launder input for a later restricted turn.
+        for turn in (2, 6, 7, 14):
+            self.assertIn(OPAQUE, tool_errors({'tool':'bash', 'input':{
+                'command':'cat sample.csv > scratch.txt'}}, turn))
 
     def test_complete_turn14_rejects_assignment_resolution_and_csv_bypasses(self):
         csv_error = 'unauditable CSV regex/split parsing'
         for command, error in (
+                ("grep ',' .csv", csv_error),
+                ("cat .csv > scratch.txt; grep ',' < scratch.txt", OPAQUE),
                 ("mkdir -p audit-bin; cp /bin/rm audit-bin/cat; printf -v PATH '%s' ./audit-bin; cat scratch", OPAQUE),
                 ("printf -v PATH '%s' ./audit-bin", OPAQUE),
                 ("printf -vPATH '%s' ./audit-bin", OPAQUE),
@@ -779,6 +837,11 @@ class ToolEvidenceTests(unittest.TestCase):
                 "printf '%s\\n' 'WARN literal' | grep WARN",
                 'cat ledger.csv',
                 "python3 -c 'import csv; print(list(csv.reader(open(\"ledger.csv\"))))'",
+                "python3 -c 'import csv as c; print(list(c.DictReader(open(\"ledger.csv\"))))'",
+                "python3 -c 'from csv import reader; print(list(reader(open(\"ledger.csv\"))))'",
+                "printf 'a,b\\n1,2\\n' > sample.csv; cat sample.csv",
+                "printf '%s\\n' safe > scratch.txt; cat scratch.txt",
+                'cat part14.log > scratch.txt',
                 "cat sample.csv | grep WARN < part14.log"):
             with self.subTest(command=command):
                 self.assertEqual(self.audit_turn14(command), [])

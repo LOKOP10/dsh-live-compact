@@ -22,6 +22,10 @@ PY_IMPORTS = {'csv': {'reader', 'DictReader'}, 'json': {'loads'}, 'pathlib': {'P
 def path_errors(value, turn, write=False, listing=False):
     if not isinstance(value, str) or not value or re.search(r'[$`*?\[\]{}~\x00]', value):
         return [OPAQUE]
+    # POSIX gives double-leading slashes implementation-defined meaning. Reject
+    # them before normalization can hide a descriptor or other path alias.
+    if value.startswith('//'):
+        return [OPAQUE]
     parts = PurePosixPath(value).parts
     if '..' in parts:
         return [OPAQUE]
@@ -208,7 +212,13 @@ def simple_audit(words, turn, depth, stdin_paths=None):
             operands.append(token)
 
     def finish(errors=(), sources=None):
-        return bad + list(errors), None if redirected_output else sources
+        # We do not track written files across commands/turns. Refuse CSV-derived
+        # or unknown output writes before a later path can erase its provenance.
+        errors = list(errors)
+        if redirected_output and (sources is None or any(
+                str(PurePosixPath(p)).lower().endswith('.csv') for p in sources)):
+            errors.append(OPAQUE)
+        return bad + errors, None if redirected_output else sources
 
     if name == 'rm':
         return finish(['forbidden rm command'])
@@ -284,7 +294,8 @@ def simple_audit(words, turn, depth, stdin_paths=None):
             if stdin_paths is None:
                 return finish([OPAQUE])
             sources |= stdin_paths
-        if name in ('grep', 'rg', 'sed', 'awk') and turn >= 7 and any(p.lower().endswith('.csv') for p in sources):
+        if name in ('grep', 'rg', 'sed', 'awk') and turn >= 7 and any(
+                str(PurePosixPath(p)).lower().endswith('.csv') for p in sources):
             bad.append('unauditable CSV regex/split parsing')
         for path in operands:
             if not path.startswith('-') and not path.isdigit():
