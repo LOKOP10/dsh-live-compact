@@ -551,6 +551,122 @@ test("dedicated first scan calibrates; second is estimated; 80 percent, cap and 
   assert.equal(f.calls.readdir.length, 4);
 });
 
+test("exclusive estimates expire at 60000 without renewal by fast returns or actual saves", (t) => {
+  const f = fixture(t);
+  configure(t, f, true, 5000);
+  let tick = 0;
+  f.io.now = () => tick;
+  rotation(f, 0, { cap: 5000 });
+  const scans = f.calls.readdir.length;
+  for (let i = 0; i < 8; i++) {
+    tick = 50000 + i * 1000;
+    backup(f, 80, { kind: i % 2 ? "cut" : "official" });
+  }
+  tick = 59999;
+  assert.equal(rotation(f, 0, { cap: 5000 }).estimated, true);
+  assert.equal(f.calls.readdir.length, scans);
+  tick = 60000;
+  const expired = rotation(f, 0, { cap: 5000 });
+  assert.equal(expired.estimated, undefined);
+  assert.equal(expired.used, 640);
+  assert.ok(f.calls.readdir.length > scans);
+  tick = 119999;
+  assert.equal(rotation(f, 0, { cap: 5000 }).estimated, true);
+  tick = 120000;
+  assert.equal(rotation(f, 0, { cap: 5000 }).estimated, undefined);
+});
+
+test("calibration lifetime starts when its successful scan completes", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  let tick = 0;
+  const read = f.io.readdir;
+  f.io.now = () => tick;
+  f.io.readdir = (...args) => { tick += 5000; return read(...args); };
+  rotation(f);
+  assert.equal(tick, 5000);
+  tick = 64999;
+  assert.equal(rotation(f).estimated, true);
+  tick = 65000;
+  assert.equal(rotation(f).estimated, undefined);
+});
+
+test("rollback since the last fast observation retires the estimate even after its calibration time", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  let tick = 0;
+  f.io.now = () => tick;
+  rotation(f);
+  tick = 59000;
+  assert.equal(rotation(f).estimated, true);
+  tick = 58000;
+  assert.equal(rotation(f).estimated, undefined);
+  tick = 58001;
+  assert.equal(rotation(f).estimated, undefined, "a rollback scan must not publish a fresh lifetime");
+  tick = 58002;
+  assert.equal(rotation(f).estimated, true);
+});
+
+for (const bad of [NaN, Infinity, -1, "throw"]) {
+  test(`invalid monotonic clock ${String(bad)} scans without seeding an estimate`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    let tick = 0;
+    f.io.now = () => { if (tick === "throw") throw new Error("clock unavailable"); return tick; };
+    rotation(f);
+    tick = bad;
+    assert.equal(rotation(f).estimated, undefined);
+    assert.equal(rotation(f).estimated, undefined);
+    tick = 1000;
+    assert.equal(rotation(f).estimated, undefined);
+    tick = 1001;
+    assert.equal(rotation(f).estimated, true);
+  });
+}
+
+test("clock failure at calibration completion does not publish a lifetime", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  let values = [0, NaN];
+  f.io.now = () => values.length ? values.shift() : 1000;
+  rotation(f);
+  assert.equal(rotation(f).estimated, undefined);
+  assert.equal(rotation(f).estimated, true);
+});
+
+test("expired failed calibration and partial deletion failure cannot refresh a fast path", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  let tick = 0;
+  f.io.now = () => tick;
+  rotation(f);
+  tick = 60000;
+  const failed = rotation(f, 0, { readdir() { throw new Error("scan denied"); } });
+  assert.equal(failed.ok, false);
+  tick++;
+  assert.equal(rotation(f).estimated, undefined);
+  const first = plant(f, "cut-1-11111111.txt", 900, 1);
+  const last = plant(f, "cut-2-22222222.txt", 100, 2);
+  const refused = rotation(f, 1000, { unlink(path) {
+    if (path === last) throw new Error("unlink denied");
+    return f.io.unlink(path);
+  } });
+  assert.equal(refused.failed, true);
+  assert.equal(existsSync(first), false);
+  assert.equal(statSync(last).size, 100);
+  assert.equal(rotation(f).estimated, undefined);
+  assert.equal(rotation(f).estimated, true);
+});
+
+test("shared roots keep full scans regardless of clock validity or elapsed lifetime", (t) => {
+  const f = fixture(t);
+  configure(t, f, false);
+  for (const tick of [0, 1, 60000, NaN]) {
+    assert.equal(rotation(f, 0, { now: () => tick }).estimated, undefined);
+  }
+  assert.equal(f.calls.readdir.length, 4);
+});
+
 test("eight actual cut/official saves below 80 percent do no backup readdir/stat after calibration and charge once", (t) => {
   const f = fixture(t);
   configure(t, f, true, 5000);
