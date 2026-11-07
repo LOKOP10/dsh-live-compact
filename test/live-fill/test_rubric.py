@@ -413,6 +413,119 @@ class ToolEvidenceTests(unittest.TestCase):
                     self.assertTrue(parsed['notice_correct'])
                     self.assertEqual(len(parsed['usage']), 2)
 
+    def test_parser_rejects_complete_notice_count_claims(self):
+        for turn in (2, 4):
+            count, other = int(turn in NOTICE), int(turn not in NOTICE)
+            claims = (
+                f'The NOTICE count is {count} (or {other}).',
+                f'The NOTICE count is {count} (fixture verified (or {other})).',
+                f'The NOTICE count is {count} (no extra lines; or {other}).',
+                f'The NOTICE count is {count}; or {other}.',
+                f'The NOTICE count is {count}; (or {other}).',
+                f'The NOTICE count is {count}; (fixture verified (or {other})).',
+                f'The NOTICE count is {count}; (verified); (or {other}).',
+                f'The NOTICE count is {count}; count is {other}.',
+                f'The NOTICE count is {count}; the count is {other}.',
+                f'The NOTICE count is {count}；数量为 {other}。',
+                f'The NOTICE count is {count}, {other}.',
+                f'The NOTICE count is {count}. The NOTICE count is {other}.',
+                f'NOTICE 数量为 {count}（或者 {other}）。',
+                f'There are {count} (or {other}) NOTICE lines.',
+                f'There are {count} NOTICE lines (or {other}).',
+                f'There are {count} NOTICE lines (verified (or {other})).',
+                f'There are {count} NOTICE lines; or {other}.',
+                f'There are {count} NOTICE lines; (or {other}).',
+                f'There are {count} NOTICE lines; (verified); (or {other}).',
+                f'There are {count} NOTICE lines; count is {other}.',
+                f'There are {other} or {count} NOTICE lines.',
+                f'There are {count} or {count} NOTICE lines.',
+                f'There are {count}.0 NOTICE lines.',
+                f'There are +{count} NOTICE lines.',
+                f'There are {count}e0 NOTICE lines.',
+                f'共有 {count} 条 NOTICE（或 {other} 条）。',
+                f'共有 {count}（或 {other} 条）NOTICE。',
+                f'The NOTICE count is {count}. NOTICE bogus',
+                f'The NOTICE count is {count}. NOTICE count: {other}',
+            )
+            claims += tuple(f'The NOTICE count is {count} '+ '(' * depth +
+                            f'fixture verified; or {other}'+')' * depth
+                            for depth in (3, 40, 128))
+            for extra in claims:
+                for supplemental in (extra, f'| Explanation | {extra} |'):
+                    with self.subTest(turn=turn, extra=supplemental):
+                        items = events(turn, self.cwd, 'sid')
+                        items[-1]['text'] += '\n'+supplemental
+                        parsed = self.parsed(items, turn)
+                        self.assertEqual(parsed['evidence_errors'], [])
+                        self.assertTrue(parsed['expected_read'])
+                        self.assertTrue(parsed['warn_correct'])
+                        self.assertFalse(parsed['notice_correct'])
+                        self.assertTrue(parsed['quality_errors'])
+                        self.assertTrue(all(error.startswith('NOTICE ') for error in parsed['quality_errors']))
+                        self.assertEqual(len(parsed['usage']), 2)
+
+    def test_parser_accepts_notice_count_explanations(self):
+        for turn in (2, 4, 11, 20):
+            count = int(turn in NOTICE)
+            for extra in (
+                f'The NOTICE count is {count}.',
+                f'The NOTICE count is {count} (fixture verified).',
+                f'The NOTICE count is {count}; (fixture verified); (read in full).',
+                f'The NOTICE count is {count} (checked part{turn}.log).',
+                f'The NOTICE count is {count} (checked line 261).',
+                f'The NOTICE count is {count} (read WARN or NOTICE entries).',
+                f'There are {count} NOTICE lines (fixture verified (read in full)).',
+                f'There are {count} (fixture verified) NOTICE lines.',
+                f'共有 {count} 条 NOTICE（已核实）。',
+                f'NOTICE 数量为 {count}（已完整读取文件）。',
+                f'The NOTICE count is {count}; the file contains 620 lines.',
+                f'The NOTICE count is {count}. We searched WARN or NOTICE entries.',
+            ):
+                with self.subTest(turn=turn, extra=extra):
+                    items = events(turn, self.cwd, 'sid')
+                    items[-1]['text'] += '\n'+extra
+                    parsed = self.parsed(items, turn)
+                    self.assertEqual(parsed['evidence_errors'], [])
+                    self.assertEqual(parsed['quality_errors'], [])
+                    self.assertTrue(parsed['expected_read'])
+                    self.assertTrue(parsed['warn_correct'])
+                    self.assertTrue(parsed['notice_correct'])
+
+    def test_parser_preserves_notice_citation_after_verified_history(self):
+        history = '历史趋势：part2→part4 的 WARN 条数为 5→6→7'
+        original = NOTICE[4]
+        for primary in (original+'\n', ''):
+            with self.subTest(primary=primary):
+                items = events(4, self.cwd, 'sid')
+                items[-1]['text'] = f'WARN: 7\n{primary}{history}；Line 261: {original}'
+                parsed = self.parsed(items, 4)
+                self.assertEqual(parsed['evidence_errors'], [])
+                self.assertEqual(parsed['quality_errors'], [])
+                self.assertTrue(parsed['expected_read'])
+                self.assertTrue(parsed['warn_correct'])
+                self.assertTrue(parsed['notice_correct'])
+                self.assertEqual(len(parsed['usage']), 2)
+        for extra in (
+            history+'；Line 261: NOTICE bogus',
+            history+f'；Line 261: {original}.',
+            history+f'；Line 261: {original}；NOTICE bogus',
+            history+f'；Line 261: {original}；The NOTICE count is 0.',
+            history+f'；The WARN count is 6；Line 261: {original}',
+            f'The WARN count is 6；{history}；Line 261: {original}',
+            history.replace('5→6→7', '5→6→8')+f'；Line 261: {original}',
+        ):
+            with self.subTest(extra=extra):
+                items = events(4, self.cwd, 'sid')
+                items[-1]['text'] += '\n'+extra
+                parsed = self.parsed(items, 4)
+                self.assertEqual(parsed['evidence_errors'], [])
+                self.assertTrue(parsed['expected_read'])
+                self.assertTrue(parsed['quality_errors'])
+                if 'The WARN count is 6' in extra or '5→6→8' in extra:
+                    self.assertFalse(parsed['warn_correct'])
+                else:
+                    self.assertFalse(parsed['notice_correct'])
+
     def test_real_check_redirections_and_captured_exit(self):
         out, err = self.cwd/'check_out.txt', self.cwd/'check_err.txt'
         commands = ['./check.sh', 'sh ./check.sh', 'bash ./check.sh', './check.sh 2>&1',

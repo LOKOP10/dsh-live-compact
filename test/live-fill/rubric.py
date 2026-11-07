@@ -137,6 +137,65 @@ def counts_before_warn(line):
             yield line[match.start():before_end] + line[counted.end():after_end]
 
 
+def notice_count_values(line):
+    """Audit whole count clauses, including annotations and continuations."""
+    clauses, start, stack = [], 0, []
+    for index, char in enumerate(line):
+        if char in '(（':
+            stack.append(char)
+        elif char in ')）' and stack:
+            stack.pop()
+        if not stack and (char in ',，;；。|' or
+                          (char == '.' and (index + 1 == len(line) or line[index + 1].isspace()))):
+            clauses.append(line[start:index])
+            start = index + 1
+    clauses.append(line[start:])
+    previous = None
+    for clause in clauses:
+        # A separator does not turn an alternate value into unrelated prose.
+        values = []
+        continuation = (r'\s*(?:[（(]|'+ALTERNATIVE+r'|/|(?:but\s+)?'
+                        r'(?:[+-]?\d|not\b|actually\b|而是|实为|(?:(?:the\s+)?count|条数|数量)\s*(?:[:：=为]|\bis\b)))')
+        if previous is not None and re.match(continuation, clause, re.I):
+            values.append(previous+' '+clause)
+        for match in re.finditer(r'NOTICE\s*(?:(?:(?:lines?|rows?|entries|matches)\s+)?count|条数|数量)\s*(?:[:：=为]|\bis\b)\s*', clause, re.I):
+            values.append(clause[match.end():])
+        for match in re.finditer(r'(?<![a-zA-Z0-9_])[+-]?\d+(?:[.\w]*\d+)?', clause):
+            end, depth = match.end(), 0
+            while end < len(clause):
+                char = clause[end]
+                if char in '(（':
+                    depth += 1
+                elif depth and char in ')）':
+                    depth -= 1
+                elif not depth and not char.isspace():
+                    break
+                end += 1
+            noun = re.match(r'(?:条\s*)?NOTICE\b(?:\s*(?:lines?|rows?|entries|matches)\b)?', clause[end:], re.I)
+            if noun:
+                value = clause[match.start():end]+clause[end+noun.end():]
+                alternative = re.search(r'\d+\s*(?:'+ALTERNATIVE+r'|/)\s*$', clause[:match.start()], re.I)
+                values.append(clause[alternative.start():match.start()]+value if alternative else value)
+        yield from values
+        previous = values[-1] if values else None
+
+
+def notice_count_value(value, expected):
+    match = re.fullmatch(r'(0|[1-9]\d*)(?![\w.])\s*(.*)', value.strip())
+    if not match or match[1] != str(expected):
+        return False
+    suffix = match[2]
+    stack = []
+    for char in suffix:
+        if char in '(（':
+            stack.append(')' if char == '(' else '）')
+        elif char in ')）' and (not stack or stack.pop() != char):
+            return False
+    # File/line references explain the count; they are not alternate values.
+    explanation = re.sub(r'\bpart\d+\.log\b|\bline\s+\d+\b', '', suffix, flags=re.I)
+    return not (stack or re.search(UNCERTAIN+r'|\d|(?:'+ALTERNATIVE+r'|/)\s*(?:none|zero|one)\b', explanation, re.I))
+
+
 def fill_answer(text, turn):
     warn, notice = [], []
     cited_notice = []
@@ -166,6 +225,7 @@ def fill_answer(text, turn):
                         bad.append('NOTICE false supplemental row')
                     continue
                 line = ' '.join(row)
+        before_history = line
         line = historical_context(line, turn)
         match = re.fullmatch(WARN_LABEL + r"(?:\s*[:：=为共]\s*|\s+is\s+|\s+)(0|[1-9]\d*)\s*(?:条|lines?)?[。.]?", line, re.I)
         if match:
@@ -194,6 +254,11 @@ def fill_answer(text, turn):
             for count in counts_before_warn(supplemental):
                 if not warn_value(count, 3 + turn % 9):
                     bad.append('WARN contradictory supplemental count')
+        if line != before_history:
+            # Only an empty, verified history clause may precede a citation.
+            # Keep the complete cited original and any suffix for exact audit.
+            line = re.sub(r'^\s*(?:(?:历史趋势|Earlier trend)\s*[:：])?\s*[;；]\s*(?=Line \d+:\s*NOTICE )',
+                          '', line, flags=re.I)
         cited = re.fullmatch(r'Line \d+:\s*(NOTICE .+)', line)
         if cited:
             cited_notice.append(cited[1])
@@ -214,7 +279,7 @@ def fill_answer(text, turn):
             if explanation and (re.search(UNCERTAIN, explanation, re.I) or
                                 not re.fullmatch(r"(?:文件中)?(?:没有任何|无|没有)\s*NOTICE\s*(?:行|条目)|no NOTICE (?:lines?|entries)", explanation, re.I)):
                 bad.append('NOTICE ambiguous explanation')
-        elif core.startswith('NOTICE ') and not re.match(r'NOTICE\s+(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b', core, re.I):
+        elif core.startswith('NOTICE ') and not re.match(r'NOTICE\s+(?:(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b|条数|数量)', core, re.I):
             notice.append(candidate)  # original NOTICE bytes, including any false suffix
         elif labeled and notice_label(labeled[1]):
             bad.append('NOTICE ambiguous/contradictory current answer')
@@ -225,17 +290,14 @@ def fill_answer(text, turn):
             present = bool(re.search(r'NOTICE\s*(?:存在|is present)|(?:有|\bthere is\s*)\s*(?:一|1)\s*(?:条\s*)?NOTICE', line, re.I))
             if (absent and turn in NOTICE) or (present and turn not in NOTICE):
                 bad.append('NOTICE contradictory supplemental claim')
-            for count in re.findall(r'(\d+)\s*(?:条\s*)?NOTICE\b', line, re.I):
-                if count != str(int(turn in NOTICE)):
+            for value in notice_count_values(line):
+                if not notice_count_value(value, int(turn in NOTICE)):
                     bad.append('NOTICE contradictory supplemental count')
-            original = re.search(r'NOTICE\s+([a-zA-Z].*)', line, re.I)
-            if original and not re.match(r'(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b', original[1], re.I):
-                bad.append('NOTICE extra original claim')
+            for original in re.finditer(r'NOTICE\s+([a-zA-Z]+)', line, re.I):
+                if not re.match(r'(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b', original[1], re.I):
+                    bad.append('NOTICE extra original claim')
             if re.search(r'NOTICE\s*[:：=]', line, re.I):
                 bad.append('NOTICE ambiguous extra answer')
-            after_count = re.search(r'NOTICE\s*(?:count|条数|数量)\s*(?:[:：=为]|is)\s*(\S+)', line, re.I)
-            if after_count and after_count[1].rstrip('。.') != str(int(turn in NOTICE)):
-                bad.append('NOTICE contradictory supplemental count')
             extra_line = re.search(r'NOTICE\s+(?:original line|line)\s*(?:is|为|[:：=])\s*(.+)', line, re.I)
             if extra_line and extra_line[1] != (NOTICE.get(turn) or 'NONE'):
                 bad.append('NOTICE false supplemental original')
