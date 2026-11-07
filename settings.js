@@ -28,6 +28,22 @@ export const ENV = Object.freeze({
   cooldownMs: "SPINE_COOLDOWN_MS",
 });
 
+/** stock 引擎自己的字段。多给一个键它就直接报 unknown key，所以传给引擎前要摘出来。 */
+export const ENGINE_KEYS = Object.freeze([
+  "auto",
+  "thresholdRatio",
+  "headroomTokens",
+  "retainRatio",
+  "retainTokens",
+  "compactionRetries",
+]);
+
+export function engineConfig(config = {}) {
+  const next = {};
+  for (const key of ENGINE_KEYS) if (config?.[key] !== undefined) next[key] = config[key];
+  return next;
+}
+
 /** 运行期现值。引擎构造时写入一次，plan 侧按需读。 */
 export const settings = { ...DEFAULTS };
 

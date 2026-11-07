@@ -7,7 +7,7 @@
  * On a preflight failure, construct neither engine. Stock would register and hide the real error.
  */
 import { loadBase, loadCompaction, loadSchema } from "./adapter.js";
-import { configSchema } from "./settings.js";
+import { configSchema, engineConfig } from "./settings.js";
 
 let Engine = null;
 let Stock = null;
@@ -124,7 +124,7 @@ export default class LiveCompactEntry {
     }
     if (!loadError && !skipStock && Engine) {
       try {
-        return new Engine(ctx, config);
+        return new Engine(ctx, engineConfig(config));
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
         releaseCompaction(ctx);
@@ -135,7 +135,7 @@ export default class LiveCompactEntry {
     if (!skipStock && process.env.SPINE_STOCK_FAIL !== "1" && Stock) {
       try {
         visibleTakeover(ctx, `这一轮用原版压缩。${reasonText(cause)}`);
-        return new Stock(ctx, config);
+        return new Stock(ctx, engineConfig(config));
       } catch (error) {
         cause = error instanceof Error ? error : new Error(String(error));
         releaseCompaction(ctx);

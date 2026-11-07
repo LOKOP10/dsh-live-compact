@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
-import { applySettings, settings } from "./settings.js";
+import { applySettings, engineConfig, settings } from "./settings.js";
 import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, rawExcerptText, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
@@ -397,7 +397,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
 
   constructor(ctx, config) {
     if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
-    super(ctx, config);
+    super(ctx, engineConfig(config));
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     applySettings(config);
     try {
