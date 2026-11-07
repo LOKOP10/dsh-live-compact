@@ -11,6 +11,7 @@
   },
   "exports": {
     ".": "./shell.js",
+    "./client": "./client.js",
     "./engine": "./index.js",
     "./gate": "./gate.js",
     "./shadow-search": "./shadow-search.js"
@@ -19,6 +20,7 @@
     "shell.js",
     "adapter.js",
     "settings.js",
+    "client.js",
     "index.js",
     "gate.js",
     "plan.js",
@@ -49,7 +51,8 @@
     "@deepseek-ai/dsh-compaction": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/dsh-compaction-basic": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0",
-    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+    "@deepseek-ai/schemastery": ">=3.18.0 <4",
+    "react": ">=18"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-compaction": "0.2.0-rc.2",
@@ -59,6 +62,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
     }
   },
   "repository": {

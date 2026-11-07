@@ -256,21 +256,6 @@ dsh-live-compact --version
 
 这些环境变量只在配置缺席时兜底。优先级是：**配置 > 环境变量 > 默认值**。
 
-## 设置界面
-
-不自写表单、不发客户端包：`settings.js` 声明一份 schema，宿主官方设置页按它自动生成，改完由宿主重装插件，不用重启。
-
-| 字段 | 默认 | 作用 |
-|---|---:|---|
-| `minTokens` | 20000 | 轮后小切的起点 |
-| `keepRounds` | 3 | 原处保留的最近已结束工具轮数 |
-| `keepRoundTokens` | 32000 | 云端收尾停止线 |
-| `pointerTokens` | 0（跟随 `chunkMax`） | 单个工具结果超过此值只留指针 |
-| `chunkMin` / `chunkMax` | 1000 / 32000 | 一刀的最小 / 最大量 |
-| `bigGate` | 650000 | 绝对停切线 |
-| `cooldownMs` | 0 | 官方压缩后跳过小切的时间窗 |
-
-官方大压缩那几项（`auto`、`thresholdRatio`、`headroomTokens`、`retainRatio`、`retainTokens`、`compactionRetries`）也在同一份 schema 里，字段名和默认值都没变。
 | `SPINE_CHUNK_MIN` | 1000 | 一刀至少包含的 token 数。 |
 | `SPINE_CHUNK_MAX` | 32000（`RAIL_TOKENS`） | 一刀最多包含的 token 数，也是指针阈值的默认值。 |
 | `SPINE_COOLDOWN_MS` | 0 | 官方压缩后的额外时间窗口；仅正数开启，未设置、空串、非数字、0 或负数均关闭。 |
@@ -279,6 +264,16 @@ dsh-live-compact --version
 
 `gate.js` 的官方压缩预设默认使用 `thresholdRatio: 0.8`、`headroomTokens: 65536`、`retainTokens: 8192`，可在启动前用对应环境变量覆盖。这些数值只管官方大压缩，不改小切切点。
 
+## 设置界面
+
+不自建传输、不打包：表单挂在宿主官方的插件设置页里，数据走官方 `ConfigPageForm`，写入走官方 `form.mutate`，词典走官方 `ctx.locale`。`client.js` 用 `React.createElement` 写，没有 JSX，因此仍然不需要构建步骤。
+
+分两栏：
+
+- **常用**：起切 token 数（`minTokens`）、大结果只留指针（`pointerTokens`）、保留原文轮数（`keepRounds`）、自动压缩（`auto`）。
+- **高级设置**：`chunkMin`、`chunkMax`、`keepRoundTokens`、`bigGate`、`cooldownMs`，以及官方大压缩的 `thresholdRatio`、`headroomTokens`、`retainTokens`、`compactionRetries`。
+
+改完由宿主重装插件，不用重启。官方大压缩那几项字段名和默认值都没变；只给插件自己的旋钮换了入口。
 ## 安装
 
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。

@@ -793,9 +793,20 @@ check("p0-17 settings schema owns the plugin knobs", () => {
   const shape = shellEntry.Config({});
   const knobs = ["minTokens", "keepRounds", "keepRoundTokens", "pointerTokens", "chunkMin", "chunkMax", "bigGate", "cooldownMs"];
   for (const key of knobs) assert.equal(shape[key], DEFAULTS[key], key);
-  for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainRatio", "retainTokens", "compactionRetries"]) {
+  for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainTokens", "compactionRetries"]) {
     assert.equal(key in shape, true, key);
   }
+});
+
+check("p0-18 settings UI ships through native client slots", () => {
+  assert.equal(packageJson.exports["./client"], "./client.js");
+  assert.equal(packageJson.dsh.client.platform, "web");
+  assert.equal(packageJson.files.includes("client.js"), true);
+  const source = readFileSync(join(packageRoot, "client.js"), "utf8");
+  assert.match(source, /plugins\.row\.config/);
+  assert.match(source, /locale\.register/);
+  assert.match(source, /form\.mutate/);
+  assert.equal(/from\s*["']@deepseek-ai\//.test(source), false);
 });
 
 check("p0-17 config beats env beats default", () => {

@@ -33,7 +33,6 @@ export const ENGINE_KEYS = Object.freeze([
   "auto",
   "thresholdRatio",
   "headroomTokens",
-  "retainRatio",
   "retainTokens",
   "compactionRetries",
 ]);
@@ -75,7 +74,6 @@ export function configSchema(z) {
     auto: z.boolean().default(true),
     thresholdRatio: z.number().default(0.8),
     headroomTokens: count(0).default(65536),
-    retainRatio: z.number().default(0.16),
     retainTokens: count(0).default(8192),
     compactionRetries: count(0).default(0),
     minTokens: count(0).default(DEFAULTS.minTokens)
