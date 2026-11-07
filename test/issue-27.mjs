@@ -720,6 +720,68 @@ test("invalid incoming, cap and observed sizes never authorize deletion or backu
   assert.deepEqual(f.calls.unlink, []);
 });
 
+for (const code of ["EPERM", "EACCES", "EIO"]) {
+  test(`session owner PID ${code} is protected; only ESRCH proves death`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    const file = plant(f, "other/cut-1-11111111.txt", 900);
+    const owner = join(f.dir, "other", "owner");
+    writeFileSync(owner, "424242");
+    let status = code;
+    const kill = process.kill;
+    t.mock.method(process, "kill", (pid, signal) => {
+      if (pid === 424242) throw Object.assign(new Error(status), { code: status });
+      return kill(pid, signal);
+    });
+    let reads = 0;
+    withFsMock(t, "readFileSync", (read) => (path, ...args) => {
+      if (String(path) === owner) reads++;
+      return read(path, ...args);
+    }, () => {
+      const refused = rotation(f, 200, { sessionKey: "mine" });
+      assert.equal(refused.ok, false);
+      assert.equal(statSync(file).size, 900);
+      assert.deepEqual(f.calls.unlink, []);
+      assert.equal(reads, 1, "read owner once to avoid inconsistent classifications");
+      status = "ESRCH";
+      assert.equal(rotation(f, 200, { sessionKey: "mine" }).ok, true);
+      assert.equal(existsSync(file), false);
+    });
+  });
+}
+
+for (const kind of ["unreadable", "empty", "malformed", "negative", "exponent"]) {
+  test(`an ${kind} session owner is not evidence of a dead session`, (t) => {
+    const f = fixture(t);
+    configure(t, f);
+    const file = plant(f, "other/cut-1-11111111.txt", 900);
+    const owner = join(f.dir, "other", "owner");
+    const text = { unreadable: "424242", empty: "", malformed: "unknown", negative: "-1", exponent: "1e3" }[kind];
+    writeFileSync(owner, text);
+    withFsMock(t, "readFileSync", (read) => (path, ...args) => {
+      if (kind === "unreadable" && String(path) === owner) throw Object.assign(new Error("owner denied"), { code: "EACCES" });
+      return read(path, ...args);
+    }, () => {
+      assert.equal(rotation(f, 200, { sessionKey: "mine", alive: () => false }).ok, false);
+      assert.equal(statSync(file).size, 900);
+      assert.deepEqual(f.calls.unlink, []);
+    });
+  });
+}
+
+test("unknown custom liveness and genuinely missing owners have distinct deletion behavior", (t) => {
+  const f = fixture(t);
+  configure(t, f);
+  const file = plant(f, "other/cut-1-11111111.txt", 900);
+  const owner = join(f.dir, "other", "owner");
+  writeFileSync(owner, "424242");
+  assert.equal(rotation(f, 200, { sessionKey: "mine", alive() { throw new Error("unknown status"); } }).ok, false);
+  assert.equal(statSync(file).size, 900);
+  unlinkSync(owner);
+  assert.equal(rotation(f, 200, { sessionKey: "mine" }).ok, true);
+  assert.equal(existsSync(file), false);
+});
+
 test("original removal order, both protection forms, live owners, raw metadata and unrelated files are preserved", (t) => {
   const f = fixture(t);
   configure(t, f);

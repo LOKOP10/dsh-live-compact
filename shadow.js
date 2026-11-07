@@ -515,9 +515,9 @@ function ownerPid(dir) {
   try {
     const text = readFileSync(join(dir, "owner"), "utf8").trim();
     const pid = Number(text);
-    return Number.isInteger(pid) && pid > 0 ? pid : 0;
-  } catch {
-    return 0;
+    return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(pid) ? pid : null;
+  } catch (error) {
+    return error?.code === "ENOENT" ? 0 : null;
   }
 }
 
@@ -525,8 +525,8 @@ function processAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return error?.code !== "ESRCH";
   }
 }
 
@@ -1106,7 +1106,11 @@ export function listShadowEntries(dir, alive = processAlive, { readdir = readdir
       continue;
     }
     if (!entry.isDirectory()) continue;
-    const live = ownerPid(path) ? alive(ownerPid(path)) : false;
+    const owner = ownerPid(path);
+    let live = owner === null;
+    if (owner > 0) {
+      try { live = alive(owner) !== false; } catch { live = true; }
+    }
     for (const file of listPluginShadows(path, { readdir, stat, onError })) {
       entries.push({ ...file, legacy: false, live, sessionKey: file.sessionKey || entry.name });
     }
