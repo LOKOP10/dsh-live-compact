@@ -972,6 +972,34 @@ test("unknown custom liveness and genuinely missing owners have distinct deletio
   assert.equal(existsSync(file), false);
 });
 
+for (const optIn of [false, true]) {
+  for (const kind of ["other-live", "mine", "other-dead"]) {
+    test(`raw body cannot override directory ownership: ${kind}, ${optIn ? "dedicated" : "shared"}`, (t) => {
+      const f = fixture(t);
+      configure(t, f, optIn);
+      const key = kind === "mine" ? "mine" : "other";
+      const marker = kind === "mine" ? "other" : "mine";
+      const first = `# spine-session ${marker}\n`;
+      const raw = captureOwnedToolResult({ dir: join(f.dir, key), root: f.dir,
+        toolCallId: "body-is-data", text: first + "x".repeat(900 - Buffer.byteLength(first)) });
+      assert.equal(raw.ok, true);
+      const result = rotation(f, 200, { sessionKey: "mine", alive: () => kind !== "other-dead" });
+      const protectedOther = kind === "other-live";
+      assert.equal(result.ok, !protectedOther);
+      assert.equal(result.deleted, protectedOther ? 0 : 1);
+      assert.equal(existsSync(raw.path), protectedOther);
+      assert.equal(existsSync(`${raw.path}.meta.json`), protectedOther);
+      if (protectedOther) {
+        assert.equal(readFileSync(raw.path, "utf8"), first + "x".repeat(900 - Buffer.byteLength(first)));
+        assert.deepEqual(f.calls.unlink, []);
+        assert.throws(() => backup(f, 200), /backup is full; leaving the span/);
+        assert.equal(existsSync(raw.path), true);
+        assert.equal(existsSync(`${raw.path}.meta.json`), true);
+      }
+    });
+  }
+}
+
 test("original removal order, both protection forms, live owners, raw metadata and unrelated files are preserved", (t) => {
   const f = fixture(t);
   configure(t, f);
