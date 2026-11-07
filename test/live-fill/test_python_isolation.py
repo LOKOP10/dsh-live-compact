@@ -77,3 +77,33 @@ class PythonIsolationTests(unittest.TestCase):
             self.assertIn(OPAQUE,tool_errors(call,14,cwd=roots[0]))
             self.assertEqual(tool_errors(call,14,cwd=roots[1]),[])
             self.assertEqual(tool_errors({'tool':'read','input':{'file_path':'sample.csv'}},14,cwd=roots[0]),[])
+
+
+    def test_normalized_aliases_remain_protected_after_exact_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'conf').mkdir();file=root/'conf/settings.toml'
+            original='port = 8642'+chr(10);file.write_text(original)
+            for alias in ('conf/./settings.toml','conf//settings.toml','conf/.//settings.toml'):
+                for text in ('port = 1',original):
+                    call={'tool':'write','input':{'file_path':alias,'content':text}}
+                    self.assertIn('forbidden protected path write',tool_errors(call,14,cwd=root))
+                    (root/alias).write_text(text)
+                self.assertEqual(file.read_text(),original)
+
+    def test_dotted_directory_search_requires_regular_file_evidence(self):
+        import hashlib,shutil
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder=root/'inputs.d';folder.mkdir()
+            csv=folder/'sample.csv';csv.write_text('a,b'+chr(10)+'1,2'+chr(10))
+            log=root/'part14.log';log.write_text('WARN synthetic'+chr(10))
+            files={'inputs.d/sample.csv':hashlib.sha256(csv.read_bytes()).hexdigest(),
+                   'part14.log':hashlib.sha256(log.read_bytes()).hexdigest()}
+            if shutil.which('rg'):
+                actual=subprocess.check_output(['rg','-o','^[^,]+','inputs.d'],cwd=root,text=True,timeout=10)
+                self.assertIn('sample.csv:a',actual)
+            self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':"rg -o '^[^,]+' inputs.d"}},14,cwd=root,files=files))
+            self.assertIn(OPAQUE,tool_errors({'tool':'grep','input':{'path':'inputs.d','pattern':','}},14,cwd=root,files=files))
+            good={'tool':'bash','input':{'command':'rg WARN part14.log'}}
+            self.assertEqual(tool_errors(good,14,cwd=root,files=files),[])
+            self.assertIn(OPAQUE,tool_errors(good,14,cwd=root))
+            self.assertEqual(tool_errors({'tool':'grep','input':{'path':'part14.log','pattern':'WARN'}},14,cwd=root,files=files),[])

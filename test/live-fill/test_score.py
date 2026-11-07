@@ -631,6 +631,51 @@ class FullCellTests(unittest.TestCase):
                 self.assertTrue(any(x.startswith('g1/t29: unauditable tool behavior;')
                                     for x in report['tool_behavior_errors']))
 
+    @contextlib.contextmanager
+    def injected_turn(self, turn, calls, written_files=None):
+        group=self.root/'runs/spine-1';path=group/f't{turn}.jsonl'
+        items=[json.loads(x) for x in path.read_text().splitlines()]
+        extra=[]
+        for index,call in enumerate(calls):
+            extra += [dict(type='tool_call',callId=f'policy-{index}',**call),
+                      dict(type='tool_result',callId=f'policy-{index}',status='completed',result='[exit code: 0]')]
+        items[5:5]=extra
+        with contextlib.ExitStack() as changes:
+            data=''.join(json.dumps(x)+chr(10) for x in items).encode();changes.enter_context(self.changed(path,data))
+            for suffix in ('.meta.json','.process.json'):
+                target=path.with_suffix(suffix);meta=read_json(target);meta['stdout_sha256']=sha(data)
+                changes.enter_context(self.changed(target,json.dumps(meta).encode()))
+            if written_files:
+                for later in range(turn,32):
+                    target=group/f't{later}.snapshot.json';snap=read_json(target)
+                    for name,text in written_files.items():snap['texts'][name]=text;snap['files'][name]=sha(text.encode())
+                    raw=json.dumps(snap).encode();changes.enter_context(self.changed(target,raw))
+                    target=group/f't{later}.meta.json';meta=read_json(target);meta['snapshot_sha256']=sha(raw)
+                    changes.enter_context(self.changed(target,json.dumps(meta).encode()))
+            yield score_cell(self.root)
+
+    def test_normalized_protected_paths_cannot_modify_then_restore(self):
+        original=(self.root/'work/spine-1/conf/settings.toml').read_text()
+        for alias in ('conf/./settings.toml','conf//settings.toml'):
+            calls=[dict(tool='write',input={'file_path':alias,'content':text}) for text in ('port = 1',original)]
+            with self.subTest(alias=alias),self.injected_turn(14,calls) as report:
+                self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+                self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+                self.assertFalse(report['hard_quality_pass'])
+                self.assertFalse(report['gate_pass'])
+                self.assertIn('g1/t14: forbidden protected path write',report['tool_behavior_errors'])
+
+    def test_dotted_directory_rg_is_rejected_in_complete_cell(self):
+        text='a,b'+chr(10)+'1,2'+chr(10)
+        calls=[dict(tool='bash',input={'command':'mkdir -p inputs.d'}),
+               dict(tool='write',input={'file_path':'inputs.d/sample.csv','content':text}),
+               dict(tool='bash',input={'command':"rg -o '^[^,]+' inputs.d"})]
+        with self.injected_turn(14,calls,{'inputs.d/sample.csv':text}) as report:
+            self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+            self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+            self.assertFalse(report['hard_quality_pass'])
+            self.assertFalse(report['gate_pass'])
+
     def test_candidate_wrong_nonzero_stock_wrong_reported(self):
         for root in (self.root,self.stock):
             with self.bad_answer(root):

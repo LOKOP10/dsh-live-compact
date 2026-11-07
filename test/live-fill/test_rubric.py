@@ -3,7 +3,7 @@ import copy
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from contract import MANIFEST, NOTICE, sha
 from mkfx import write_workspace
@@ -787,7 +787,7 @@ class ToolEvidenceTests(unittest.TestCase):
             call = {'tool':'grep', 'input':{'path':path, 'pattern':','}}
             with self.subTest(path=path):
                 self.assertIn('unauditable CSV regex/split parsing', self.audit_turn14([call]))
-                self.assertEqual(tool_errors(call, 6), [])
+                self.assertEqual(tool_errors(call, 6, files={str(PurePosixPath(path)): "0"*64}), [])
                 self.assertIn('unauditable CSV regex/split parsing',
                               self.audit_turn14("grep ',' "+path))
 

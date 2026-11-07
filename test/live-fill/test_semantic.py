@@ -288,6 +288,25 @@ class SemanticTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'hard evidence/tool/behavior failure'):
                     verify(self.policy, self.packet, self.mapping, self.receipts)
 
+    def test_normalized_protected_writes_and_directory_rg_are_nonwaivable(self):
+        path=self.roots['ds/candidate']/'runs/spine-1/t14.jsonl'
+        original=[json.loads(x) for x in path.read_text().splitlines()]
+        cfg=(self.roots['ds/candidate']/'work/spine-1/conf/settings.toml').read_text()
+        variants=[[dict(tool='write',input={'file_path':alias,'content':text}) for text in ('port = 1',cfg)]
+                  for alias in ('conf/./settings.toml','conf//settings.toml')]
+        variants.append([dict(tool='bash',input={'command':'mkdir -p inputs.d'}),
+                         dict(tool='write',input={'file_path':'inputs.d/sample.csv','content':'a,b'+chr(10)+'1,2'}),
+                         dict(tool='bash',input={'command':"rg -o '^[^,]+' inputs.d"})])
+        for calls in variants:
+            items=copy.deepcopy(original);extra=[]
+            for index,call in enumerate(calls):
+                extra += [dict(type='tool_call',callId=f'policy-{index}',**call),
+                          dict(type='tool_result',callId=f'policy-{index}',status='completed',result='[exit code: 0]')]
+            items[5:5]=extra
+            with self.subTest(calls=calls),self.changed_events(path,items):
+                with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):
+                    verify(self.policy,self.packet,self.mapping,self.receipts)
+
     def test_absent_full_run_or_stale_run_rejected(self):
         path = self.extra_path
         path.rename(path.with_suffix('.held'))
