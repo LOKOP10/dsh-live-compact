@@ -9,6 +9,7 @@ import { Session } from "@deepseek-ai/dsh-session";
 import { contentHash, pointerFor, PRUNE_MARKER, rawName } from "../raw.js";
 import { sessionDir } from "../shadow.js";
 import { fixture, runtime } from "./helpers/runtime.mjs";
+import { windowsAclCall } from "./helpers/windows-acl.mjs";
 
 test("guarded prune retries the first busy result, caches later captures and publishes only safe cursor progress", (t) => {
   const h = runtime(t);
@@ -323,17 +324,20 @@ test("cursor temps inherit the secured Windows session ACL before creation", (t)
   const key = "windows-cursor";
   const dir = sessionDir(h.root, key);
   const grants = [];
-  const access = { platform: "win32", env: { SystemRoot: "D:\\WinX" }, execFile(file, args) {
-    if (file.endsWith("whoami.exe")) return '"DESKTOP","S-1-5-21-100-200-300-1001"';
-    assert.ok(file.endsWith("icacls.exe"));
-    grants.push([...args]);
-    return "";
+  const sid = "S-1-5-21-100-200-300-1001";
+  const env = { SystemRoot: "D:\\WinX" };
+  const access = { platform: "win32", env, execFile(file, args, options) {
+    if (file.endsWith("whoami.exe")) return `"DESKTOP","${sid}"`;
+    grants.push(windowsAclCall(file, args, options, env, sid));
+    return "DSH_SHADOW_ACL_OK";
   } };
   const open = fs.openSync;
   let creates = 0;
   const openMock = t.mock.method(fs, "openSync", (file, flags, mode) => {
     assert.equal(dirname(String(file)), dir);
-    assert.deepEqual(grants.map((args) => args[0]), [h.root, dir], "both directory ACLs must precede temp creation");
+    assert.deepEqual(grants.map(({ path, kind }) => ({ path, kind })), [
+      { path: fs.realpathSync.native(h.root), kind: "dir" }, { path: fs.realpathSync.native(dir), kind: "dir" },
+    ], "both directory ACLs must precede temp creation");
     assert.equal(flags, "wx");
     assert.equal(mode, 0o600);
     creates++;
@@ -345,10 +349,6 @@ test("cursor temps inherit the secured Windows session ACL before creation", (t)
     engine.writeCaptureCursor(key, 300, access);
   } finally { openMock.mock.restore(); syncBuiltinESMExports(); }
   assert.equal(creates, 2);
-  for (const args of grants) {
-    assert.deepEqual(args.slice(1, 3), ["/inheritance:r", "/grant:r"]);
-    assert.ok(args.slice(3).every((grant) => grant.endsWith(":(OI)(CI)F")));
-  }
   assert.equal(engine.readCaptureCursor(key), 300);
   assert.equal(readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
   assert.deepEqual(h.warnings, []);

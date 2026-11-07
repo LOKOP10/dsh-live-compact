@@ -873,7 +873,7 @@ export function ensureShadowDir(dir, access = {}) {
   return dir;
 }
 
-function tightenCreatedShadow(file, fd, access) {
+export function tightenCreatedShadow(file, fd, access, { remember = true } = {}) {
   if ((access.platform ?? process.platform) === "win32" && !access.runner && !shadowFuse) {
     try {
       if (shadowDirLocked(dirname(file))) {
@@ -883,7 +883,8 @@ function tightenCreatedShadow(file, fd, access) {
           throw new Error("spine: shadow created file identity changed");
         }
         // Only this wx-created object is known to inherit our confirmed DACL.
-        lockedFiles.set(entry.canonical, entry);
+        if (remember) lockedFiles.set(entry.canonical, entry);
+        return;
       }
     } catch (cause) {
       tripFuse();

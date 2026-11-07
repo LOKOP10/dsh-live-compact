@@ -32,6 +32,7 @@ import {
   shadowAccessFused,
   shadowFileBody,
   shadowMaxBytes,
+  tightenCreatedShadow,
   tightenShadow,
   writeShadowFile,
   writeShadowOwner,
@@ -941,7 +942,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const candidate = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
       fd = openSync(candidate, "wx", 0o600);
       tmp = candidate;
-      tightenShadow(tmp, "file", access);
+      tightenCreatedShadow(tmp, fd, access, { remember: false });
       writeFileSync(fd, JSON.stringify({ v: 1, key, cursor }));
       closeSync(fd);
       fd = undefined;
