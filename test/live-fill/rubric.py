@@ -3,7 +3,7 @@ import re
 import shlex
 import json
 from pathlib import Path
-from contract import MANIFEST, NOTICE
+from contract import FILL, MANIFEST, NOTICE
 
 
 def lines(text):
@@ -24,12 +24,25 @@ def cells(line):
     return None
 
 
-def history(line):
-    # Explicit sequences about named earlier parts are context, never an answer.
-    # A current-answer label overrides this exemption.
-    return (bool(re.search(r"part\d+.*(?:→|–|趋势|trend|历史|earlier)", line, re.I))
-            and not re.match(r'^(?:\|\s*)?(?:WARN|NOTICE)\b', line)
-            and not re.search(r"当前|本次|本轮|现在|current|答案|answer", line, re.I))
+def historical_context(line, turn):
+    """Remove only bounded, fixture-verified sequences, never the whole row."""
+    sequence = (r'(?<![a-zA-Z0-9_])part([1-9]\d*)(?:\.log)?\s*(?:→|–|->|至|\bto\b)\s*'
+                r'part([1-9]\d*)(?:\.log)?\s*(?:的\s*)?WARN\s*(?:条数|数量|count)?\s*'
+                r'(?:[:：=为]|\bis\b)\s*((?:0|[1-9]\d*)(?:\s*(?:→|–|->)\s*(?:0|[1-9]\d*))+)'
+                r'(?=\s*(?:[;；。|)）]|[，,]|\.(?:\s|$)|$))')
+
+    def verified(match):
+        first, last = int(match[1]), int(match[2])
+        values = [int(x) for x in re.split(r'\s*(?:→|–|->)\s*', match[3])]
+        expected = [3 + n % 9 for n in FILL if first <= n <= last]
+        # A current/answer label in this clause is never historical context.
+        prefix = re.split(r'[;；。|]', line[:match.start()])[-1]
+        current = re.search(r'当前|本次|本轮|现在|current|答案|answer', prefix, re.I)
+        if first in FILL and last in FILL and first < last <= turn and values == expected and not current:
+            return ' '
+        return match[0]
+
+    return re.sub(sequence, verified, line, flags=re.I)
 
 
 def notice_label(label):
@@ -43,13 +56,77 @@ def answer_value(value):
     return (match[1].strip(), match[2] or '') if match else (value.strip(), '')
 
 
+def warn_value(value, expected):
+    """A whole count with only balanced, bounded explanatory annotations."""
+    match = re.fullmatch(r'(0|[1-9]\d*)\s*(.*?)[。.]?', value.strip(), re.I)
+    if not match or match[1] != str(expected):
+        return False
+    suffix = match[2]
+    stack, explanation = [], []
+    for char in suffix:
+        if char in '(（':
+            stack.append(')' if char == '(' else '）')
+            explanation.append(' ')
+        elif char in ')）':
+            if not stack or stack.pop() != char:
+                return False
+            explanation.append(' ')
+        elif stack:
+            explanation.append(char)
+        elif not char.isspace():
+            return False
+    if stack:
+        return False
+    # Log excerpts were removed separately. Digits, alternatives, second count
+    # assertions and arbitrary qualifiers cannot hide in these explanations.
+    annotation = (r'(?:all(?: WARN (?:lines?|entries))?(?: are)?\s+)?ledger drift\b|'
+                  r'(?:均为|全部为|全是|都是)\s*(?:同一类\s*)?ledger drift\b|'
+                  r'same (?:category|kind)\b|同一类|同类|'
+                  r'e\.g\.?|for example\b|example\b|例如|示例')
+    return bool(re.fullmatch(r'(?:\s|[,，;；:：.。“”"\'‘’]|'+annotation+r')*',
+                             ''.join(explanation), re.I))
+
+
+def warn_claim_values(line):
+    """Sentence/clause delimiters inside an annotation cannot truncate its audit."""
+    for match in re.finditer(WARN_LABEL + r'\s*(?:[:：=为共]|\bis\b|\bare\b)\s*', line, re.I):
+        value = line[match.end():]
+        depth = 0
+        for index, char in enumerate(value):
+            if char in '(（':
+                depth += 1
+            elif char in ')）':
+                depth = max(0, depth - 1)
+            if depth == 0 and (char in '。;；' or
+                               (char == '.' and (index + 1 == len(value) or value[index + 1].isspace())
+                                and value[:index].lower()[-3:] != 'e.g')):
+                value = value[:index]
+                break
+        yield value
+
+
+def counts_before_warn(line):
+    """Scan nested annotations without a backtracking parenthesis regex."""
+    for match in re.finditer(r'\d+', line):
+        end, depth = match.end(), 0
+        while end < len(line):
+            char = line[end]
+            if char in '(（':
+                depth += 1
+            elif depth and char in ')）':
+                depth -= 1
+            elif not depth and not char.isspace():
+                break
+            end += 1
+        if re.match(r'(?:条\s*)?WARN\b', line[end:], re.I):
+            yield line[match.start():end]
+
+
 def fill_answer(text, turn):
     warn, notice = [], []
     cited_notice = []
     bad = []
     for line in lines(text):
-        if history(line):
-            continue
         if re.fullmatch(r'\d+(?:\s*(?:or|或|/)\s*\d+)?\s*(?:条)?[。.]?', line):
             bad.append('WARN ambiguous unlabeled numeric answer')
         summary = re.fullmatch(r'已读取 .*（\d+ 行，已做大小写不敏感复核，\d+ 处匹配 = (\d+) 条 WARN \+ (\d+) 条 NOTICE）：', line)
@@ -74,6 +151,7 @@ def fill_answer(text, turn):
                         bad.append('NOTICE false supplemental row')
                     continue
                 line = ' '.join(row)
+        line = historical_context(line, turn)
         match = re.fullmatch(WARN_LABEL + r"(?:\s*[:：=为共]\s*|\s+is\s+|\s+)(0|[1-9]\d*)\s*(?:条|lines?)?[。.]?", line, re.I)
         if match:
             warn.append(match[1])
@@ -82,14 +160,12 @@ def fill_answer(text, turn):
         # claims even when they share its citation/table row; keep NOTICE intact.
         supplemental, excerpts = re.subn(r'\bWARN ledger drift turn=\d+ n=\d+\b', ' ', line)
         if re.search(r"WARN", supplemental, re.I):
-            claims = re.finditer(WARN_LABEL + r'\s*(?:[:：=为共]|\bis\b|\bare\b)\s*(.+?)(?=。|[;；]|(?<!e\.g)\.(?:\s|$)|$)', supplemental, re.I)
-            for claim in claims:
-                core = answer_value(claim[1])[0]
+            for value in warn_claim_values(supplemental):
                 # A removed inline example can leave only its comma/label/quotes.
-                citation_value = re.fullmatch(r'(\d+)\s*(?:条|lines?)?\s*[,，]\s*(?:e\.g\.?|for example|example|例如|示例)\s*[:：]?\s*[“”"\'‘’\s]*', claim[1], re.I)
+                citation_value = re.fullmatch(r'(\d+)\s*(?:条|lines?)?\s*[,，]\s*(?:e\.g\.?|for example|example|例如|示例)\s*[:：]?\s*[“”"\'‘’\s]*', value, re.I)
                 if excerpts and citation_value:
-                    core = citation_value[1]
-                if core != str(3 + turn % 9) or re.match(WARN_LABEL, supplemental, re.I):
+                    value = citation_value[1]
+                if not warn_value(value, 3 + turn % 9) or re.match(WARN_LABEL, supplemental, re.I):
                     bad.append('WARN ambiguous/contradictory current answer')
             if re.search(r'(?:not|不是|并非)\s*WARN|WARN\s*(?:不是|并非|isn.t)', supplemental, re.I):
                 bad.append('WARN contradictory current answer')
@@ -100,8 +176,8 @@ def fill_answer(text, turn):
                 bad.append('WARN ambiguous/uncertain current answer')
             if re.search(r'\d+\s*(?:' + ALTERNATIVE + r'|/)\s*\d+\s*(?:条\s*)?WARN\b', supplemental, re.I):
                 bad.append('WARN ambiguous supplemental count')
-            for count in re.findall(r'(\d+)\s*(?:条\s*)?WARN\b', supplemental, re.I):
-                if count != str(3 + turn % 9):
+            for count in counts_before_warn(supplemental):
+                if not warn_value(count, 3 + turn % 9):
                     bad.append('WARN contradictory supplemental count')
         cited = re.fullmatch(r'Line \d+:\s*(NOTICE .+)', line)
         if cited:

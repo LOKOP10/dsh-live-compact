@@ -93,6 +93,100 @@ class AnswerGrammarTests(unittest.TestCase):
                       '\n当前答案：part2→part5 的 WARN 条数为 5→6→7→9'):
             self.assertTrue(fill_answer(text + extra, 5))
 
+    def test_warn_parentheticals_are_bounded_explanations(self):
+        for extra in (
+            'The WARN count is 5 (or 6)',
+            'The WARN count is 5 (WARN count is 6)',
+            'The WARN count is 5 (all ledger drift (or 6))',
+            'The WARN count is 5 (all ledger drift) (or 6)',
+            'The WARN count is 5 ((WARN count is 6))',
+            'The WARN count is 5 (6)',
+            'The WARN count is 5 (all ledger drift; count is 6)',
+            'The WARN count is 5 (all ledger drift) or 6',
+            'The WARN count is 5 (all ledger drift）',
+            '本次 WARN 条数为 5（或者 6）',
+            '说明：WARN 条数为 5（均为 ledger drift（WARN 数量为 6））',
+            '说明：WARN 条数为 5（全是 ledger drift）（或 6）',
+            'There are 5 (or 6) WARN lines.',
+            'There are 5 (all ledger drift (or 6)) WARN lines.',
+            'There are 5 (all ledger drift; or 6) WARN lines.',
+            'There are 5 (all ledger drift。or 6) WARN lines.',
+            '共有 5（或 6）条 WARN。',
+            '共有 5（均为 ledger drift；或 6）条 WARN。',
+        ):
+            with self.subTest(extra=extra):
+                errors = fill_answer('WARN: 5\nNONE\n'+extra, 2)
+                self.assertTrue(any(error.startswith('WARN ') for error in errors))
+                self.assertFalse(any(error.startswith('NOTICE ') for error in errors))
+        for extra in (
+            'The WARN count is 5 (all ledger drift).',
+            'The WARN count is 5 (all ledger drift (same category)).',
+            'The WARN count is 5 (all ledger drift; same category).',
+            'The WARN count is 5 ((all ledger drift)).',
+            '说明：WARN 条数为 5（均为 ledger drift（同一类））。',
+            'There are 5 (all ledger drift) WARN lines.',
+            '共有 5（均为 ledger drift）条 WARN。',
+            'The WARN count is 5 (e.g. (WARN ledger drift turn=2 n=0)).',
+        ):
+            with self.subTest(extra=extra):
+                self.assertEqual(fill_answer('WARN: 5\nNONE\n'+extra, 2), [])
+
+    def test_history_exemption_only_removes_verified_spans(self):
+        history = '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8'
+        for claim in ('The WARN count is 7.', '共有 7 条 WARN。',
+                      'The WARN count is 8 or 7.', '本次 WARN 条数为 8（或 7）。'):
+            for extra in (f'{history}; {claim}', f'{claim}; {history}',
+                          f'{claim}; {history}; {claim}',
+                          f'| Explanation | {history}；{claim} |',
+                          f'> {claim}；{history}'):
+                with self.subTest(extra=extra):
+                    self.assertTrue(fill_answer('WARN: 8\nNONE\n'+extra, 5))
+        for extra in (
+            '历史趋势：part2→part5；The WARN count is 6.',
+            '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8；The WARN count is 6.',
+            '历史趋势：part2→part5 的 WARN 条数为 5→6→7→9',
+            '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8 or 9',
+            '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8.5',
+            '当前 WARN 条数为 7（历史趋势：part2→part5 的 WARN 条数为 5→6→7→8）',
+            history+'；NOTICE bogus',
+        ):
+            with self.subTest(extra=extra):
+                self.assertTrue(fill_answer('WARN: 8\nNONE\n'+extra, 5))
+        # Future, invented and missing FILL turns cannot establish history.
+        for turn, extra in (
+            (2, history),
+            (8, '历史趋势：part5→part8 的 WARN 条数为 8→9→10→11'),
+            (10, '历史趋势：part8→part10 的 WARN 条数为 11→12→13'),
+            (10, '历史趋势：part7→part10 的 WARN 条数为 10→11→3→4'),
+        ):
+            with self.subTest(turn=turn, extra=extra):
+                self.assertTrue(fill_answer(f'WARN: {3+turn%9}\nNONE\n'+extra, turn))
+
+    def test_deep_warn_parentheticals(self):
+        for depth in (3, 40, 128):
+            for left, right in (('(', ')'), ('（', '）')):
+                for explanation, valid in (('all ledger drift', True), ('or 6', False)):
+                    value = '5 '+left*depth+explanation+right*depth
+                    for extra in (f'The WARN count is {value}.', f'There are {value} WARN lines.'):
+                        with self.subTest(depth=depth, extra=extra):
+                            self.assertEqual(not fill_answer('WARN: 5\nNONE\n'+extra, 2), valid)
+
+    def test_verified_history_preserves_current_prose_and_citations(self):
+        for turn, history in (
+            (5, '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8'),
+            (8, '历史趋势：part5→part8 的 WARN 条数为 8→9→11'),
+            (10, 'Earlier trend: part8–part10 WARN count is 11→3→4'),
+            (10, 'part2→part5 的 WARN 条数为 5→6→7→8'),
+        ):
+            count = 3+turn%9
+            for extra in (history, f'{history}; The WARN count is {count}.',
+                          f'The WARN count is {count}; {history}',
+                          f'| Explanation | {history} |',
+                          f'{history}; Example: WARN ledger drift turn={turn} n=0'):
+                with self.subTest(turn=turn, extra=extra):
+                    self.assertEqual(fill_answer(f'WARN: {count}\nNONE\n'+extra, turn), [])
+                    self.assertTrue(fill_answer('NONE\n'+extra, turn))
+
     def test_warn_examples_do_not_mask_current_claims(self):
         example = 'WARN ledger drift turn=2 n=0'
         for extra in (f'There are 6 WARN lines. Example: {example}',
@@ -218,6 +312,54 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertTrue(parsed['notice_correct'])
         self.assertTrue(parsed['expected_read'])
         self.assertEqual(len(parsed['usage']), 2)
+
+    def test_parser_rejects_parenthetical_and_history_bypasses(self):
+        history = '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8'
+        for turn, extra in (
+            (2, 'The WARN count is 5 (or 6)'),
+            (2, 'The WARN count is 5 (WARN count is 6)'),
+            (2, 'The WARN count is 5 (all ledger drift (or 6))'),
+            (2, '说明：WARN 条数为 5（均为 ledger drift（或 6））'),
+            (2, 'There are 5 (or 6) WARN lines.'),
+            (2, 'There are 5 (all ledger drift; or 6) WARN lines.'),
+            (2, 'The WARN count is 6. 历史趋势：part1→part2。'),
+            (2, '历史趋势：part1→part2；The WARN count is 6.'),
+            (2, history+'; The WARN count is 6.'),
+            (5, history+'; The WARN count is 7.'),
+            (5, 'The WARN count is 7; '+history),
+            (5, 'The WARN count is 8 or 7; '+history+'; 8 或 7 条 WARN。'),
+            (5, '| Explanation | '+history+'；本次 WARN 条数为 7 |'),
+        ):
+            for supplemental in (extra, f'{extra} Example: WARN ledger drift turn={turn} n=0'):
+                with self.subTest(turn=turn, extra=supplemental):
+                    items = events(turn, self.cwd, 'sid')
+                    items[-1]['text'] += '\n'+supplemental
+                    parsed = self.parsed(items, turn)
+                    self.assertEqual(parsed['evidence_errors'], [])
+                    self.assertTrue(parsed['expected_read'])
+                    self.assertFalse(parsed['warn_correct'])
+                    self.assertTrue(parsed['quality_errors'])
+                    self.assertTrue(all(error.startswith('WARN ') for error in parsed['quality_errors']))
+                    self.assertEqual(len(parsed['usage']), 2)
+
+    def test_parser_accepts_verified_history_and_explanations(self):
+        for turn, extra in (
+            (2, 'The WARN count is 5 (all ledger drift (same category)).'),
+            (2, '说明：WARN 条数为 5（例如：（WARN ledger drift turn=2 n=0））。'),
+            (5, '历史趋势：part2→part5 的 WARN 条数为 5→6→7→8; The WARN count is 8.'),
+            (8, 'The WARN count is 11; 历史趋势：part5→part8 的 WARN 条数为 8→9→11'),
+            (10, '| History | Earlier trend: part8–part10 WARN count is 11→3→4 |'),
+        ):
+            with self.subTest(turn=turn, extra=extra):
+                items = events(turn, self.cwd, 'sid')
+                items[-1]['text'] += '\n'+extra
+                parsed = self.parsed(items, turn)
+                self.assertEqual(parsed['evidence_errors'], [])
+                self.assertEqual(parsed['quality_errors'], [])
+                self.assertTrue(parsed['expected_read'])
+                self.assertTrue(parsed['warn_correct'])
+                self.assertTrue(parsed['notice_correct'])
+                self.assertEqual(len(parsed['usage']), 2)
 
     def test_real_check_redirections_and_captured_exit(self):
         out, err = self.cwd/'check_out.txt', self.cwd/'check_err.txt'
