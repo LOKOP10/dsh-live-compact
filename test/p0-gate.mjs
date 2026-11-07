@@ -791,10 +791,15 @@ check("p0-16 package ships adapter.js", () => {
 
 check("p0-17 settings schema owns the plugin knobs", () => {
   const shape = shellEntry.Config({});
+  const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
   const knobs = ["minTokens", "keepRounds", "keepRoundTokens", "pointerTokens", "chunkMin", "chunkMax", "bigGate", "cooldownMs"];
-  for (const key of knobs) assert.equal(shape[key], DEFAULTS[key], key);
+  for (const key of knobs) assert.equal(plain(shape[key]), DEFAULTS[key], key);
   for (const key of ["auto", "thresholdRatio", "headroomTokens", "retainTokens", "compactionRetries"]) {
     assert.equal(key in shape, true, key);
+  }
+  // 宿主设置界面只列 volatile 字段，漏标整份表单就不出现。
+  for (const [key, field] of Object.entries(shellEntry.Config.dict)) {
+    assert.equal(field.meta?.volatile, true, key);
   }
 });
 

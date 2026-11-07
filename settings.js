@@ -46,8 +46,11 @@ export function engineConfig(config = {}) {
 /** 运行期现值。引擎构造时写入一次，plan 侧按需读。 */
 export const settings = { ...DEFAULTS };
 
+// volatile 字段的现值是 cosmokit 的取值对象，读之前先摊平。
+const plain = (value) => (value && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
+
 const finite = (value) => {
-  const number = Number(value);
+  const number = Number(plain(value));
   return Number.isFinite(number) ? number : undefined;
 };
 
@@ -67,30 +70,41 @@ export function applySettings(config = {}, env = process.env) {
   return settings;
 }
 
-/** 官方大压缩的字段照抄 stock 引擎的 schema，剩下的才是本插件自己的旋钮。 */
+/**
+ * 官方大压缩的字段照抄 stock 引擎的 schema，剩下的才是本插件自己的旋钮。
+ * 每个字段都要 .volatile()：宿主的设置界面只列出 volatile 字段，漏一个就整份表单不出现。
+ */
 export function configSchema(z) {
   const count = (min) => z.number().step(1).min(min);
   return z.object({
-    auto: z.boolean().default(true),
-    thresholdRatio: z.number().default(0.8),
-    headroomTokens: count(0).default(65536),
-    retainTokens: count(0).default(8192),
-    compactionRetries: count(0).default(0),
+    auto: z.boolean().default(true).volatile(),
+    thresholdRatio: z.number().default(0.8).volatile(),
+    headroomTokens: count(0).default(65536).volatile(),
+    retainTokens: count(0).default(8192).volatile(),
+    compactionRetries: count(0).default(0).volatile(),
     minTokens: count(0).default(DEFAULTS.minTokens)
-      .description("轮后小切的起点，上下文到这个 token 数才切一刀。"),
+      .description("轮后小切的起点，上下文到这个 token 数才切一刀。")
+      .volatile(),
     keepRounds: count(0).default(DEFAULTS.keepRounds)
-      .description("最近几个已结束的工具轮留在原文。"),
+      .description("最近几个已结束的工具轮留在原文。")
+      .volatile(),
     keepRoundTokens: count(0).default(DEFAULTS.keepRoundTokens)
-      .description("云端收尾停止线，降到这个 token 数以下就不再切。"),
+      .description("云端收尾停止线，降到这个 token 数以下就不再切。")
+      .volatile(),
     pointerTokens: count(0).default(DEFAULTS.pointerTokens)
-      .description("单个工具结果超过这个 token 数只留指针；0 = 跟随 chunkMax。"),
+      .description("单个工具结果超过这个 token 数只留指针；0 = 跟随 chunkMax。")
+      .volatile(),
     chunkMin: count(0).default(DEFAULTS.chunkMin)
-      .description("一刀的最小量，不够就不切，避免每轮一张碎卡片。"),
+      .description("一刀的最小量，不够就不切，避免每轮一张碎卡片。")
+      .volatile(),
     chunkMax: count(1).default(DEFAULTS.chunkMax)
-      .description("一刀的最大量，和卡片轨道同为 32000。"),
+      .description("一刀的最大量，和卡片轨道同为 32000。")
+      .volatile(),
     bigGate: count(1).default(DEFAULTS.bigGate)
-      .description("绝对停切线，超过就不再做小切，交给官方大压缩。"),
+      .description("绝对停切线，超过就不再做小切，交给官方大压缩。")
+      .volatile(),
     cooldownMs: count(0).default(DEFAULTS.cooldownMs)
-      .description("官方压缩之后跳过小切的时间窗；0 = 只按事件序号跳过一次。"),
+      .description("官方压缩之后跳过小切的时间窗；0 = 只按事件序号跳过一次。")
+      .volatile(),
   });
 }

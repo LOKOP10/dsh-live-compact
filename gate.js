@@ -110,5 +110,16 @@ export default class LiveCompactGate {
       }
     }, { global: true });
     ctx.provide(GATE_SERVICE, {});
+    if (process.env.SPINE_DEBUG_SETTINGS === "1") {
+      setTimeout(() => {
+        try {
+          const described = ctx.get("settings")?.describe?.({ redactSecrets: false }) ?? [];
+          const list = Array.isArray(described) ? described : [];
+          console.error(`spine: settings namespaces = ${JSON.stringify(list.map((item) => item.ns))}`);
+        } catch (error) {
+          console.error(`spine: settings describe failed ${error?.message}`);
+        }
+      }, 15000).unref?.();
+    }
   }
 }
