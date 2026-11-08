@@ -223,8 +223,10 @@ def warn_citation_errors(text, turn):
                   if text_line.startswith('WARN ')}
     bad = []
     for line in lines(text):
-        for note in re.finditer(r'(?:行号|line numbers?)\s*([^\n]*?[0-9０-９][0-9０-９\s,，、]*)', line, re.I):
-            cited = [int(x) for x in re.findall(r'\d+', note[1])]
+        for note in re.finditer(r'(?:行号|line numbers?)', line, re.I):
+            cited = [int(x) for x in re.findall(r'\d+', line[note.end():])]
+            if not cited:
+                continue
             if (not cited or len(set(cited)) != len(cited) or
                     any(n not in warn_lines for n in cited)):
                 bad.append('WARN false supplemental citation')

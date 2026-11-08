@@ -24,6 +24,7 @@ class AnswerGrammarTests(unittest.TestCase):
         self.assertTrue(fill_answer('WARN 条数：6，例如 WARN ledger drift turn=999 n=1\nNOTICE：NONE', 3))
         self.assertTrue(fill_answer('WARN 条数：6（行号 181）（行号 9999）\nNOTICE：NONE', 3))
         self.assertTrue(fill_answer('WARN 条数：6（行号 ９９９９）\nNOTICE：NONE', 3))
+        self.assertTrue(fill_answer('WARN 条数：6\n行号（181，（９９９９））\nNOTICE：NONE', 3))
 
     def test_supporting_prose_and_markdown(self):
         for text in (
