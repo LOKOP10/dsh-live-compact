@@ -220,6 +220,17 @@ def fill_answer(text, turn):
     cited_notice = []
     bad = []
     for line in lines(text):
+        # Explicit count prose must consume the complete token. This prevents
+        # malformed values, word alternatives, and adjacent nouns from being
+        # silently skipped by the narrower extraction helpers below.
+        for malformed in re.finditer(r'(?<![\d])(?:--\d+|\d+[.，,]\d+|\d+[a-zA-Z_]+|\d+\.)\s*(?:条\s*)?(?:WARN|NOTICE)', line, re.I):
+            bad.append(('WARN' if 'WARN' in malformed[0].upper() else 'NOTICE') + ' contradictory supplemental count')
+        for malformed in re.finditer(r'(?<![\d])\d+(WARN|NOTICE)(?:条|行|lines?)', line, re.I):
+            bad.append(malformed[1].upper() + ' contradictory supplemental count')
+        if re.search(r'(?:共有|本轮共有|there\s+are|the\s+(?:WARN|NOTICE)\s+count\s+is)\s+(?:nine|zero|one)\s*(?:或|or)\b', line, re.I) or re.search(r'(?:共有|本轮共有|there\s+are|the\s+(?:WARN|NOTICE)\s+count\s+is)\s+(?:\d+)\s*(?:或|or)\s*(?:nine|zero|one)\b', line, re.I):
+            bad.append('WARN contradictory supplemental count' if 'WARN' in line.upper() else 'NOTICE contradictory supplemental count')
+        if re.search(r'(?:WARN|NOTICE)\s*(?:条|lines?|entries)?\s*[，,]\s*[+−-]?\d', line, re.I):
+            bad.append('WARN contradictory supplemental count' if 'WARN' in line.upper() else 'NOTICE contradictory supplemental count')
         if re.fullmatch(r'\d+(?:\s*(?:or|或|/)\s*\d+)?\s*(?:条)?[。.]?', line):
             bad.append('WARN ambiguous unlabeled numeric answer')
         summary = re.fullmatch(r'已读取 (?:\./)?part([1-9]\d*)\.log（(\d+) 行，已做大小写不敏感复核，(\d+) 处匹配 = (\d+) 条 WARN \+ (\d+) 条 NOTICE）：', line)
@@ -321,9 +332,11 @@ def fill_answer(text, turn):
                 exists = (claim[2].lower() == 'present') != bool(claim[1])
                 if exists != (turn in NOTICE):
                     bad.append('NOTICE contradictory supplemental claim')
-            for value in notice_count_values(line):
-                if not notice_count_value(value, int(turn in NOTICE)):
-                    bad.append('NOTICE contradictory supplemental count')
+            negative_notice = bool(re.search(r'(?:没有|不存在|无|\bno\b)\s*(?:任何\s*)?(?:[一1]\s*)?NOTICE', line, re.I))
+            if not negative_notice:
+                for value in notice_count_values(line):
+                    if not notice_count_value(value, int(turn in NOTICE)):
+                        bad.append('NOTICE contradictory supplemental count')
             for original in re.finditer(r'NOTICE\s+([a-zA-Z]+)', line, re.I):
                 if not re.match(r'(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b', original[1], re.I):
                     bad.append('NOTICE extra original claim')
@@ -332,7 +345,9 @@ def fill_answer(text, turn):
             extra_line = re.search(r'NOTICE\s+(?:original line|line)\s*(?:is|为|[:：=])\s*(.+)', line, re.I)
             if extra_line and extra_line[1] != (NOTICE.get(turn) or 'NONE'):
                 bad.append('NOTICE false supplemental original')
-            if re.search(UNCERTAIN, line.split('。')[0], re.I):
+            if re.search(r'(?:NOTICE\s*(?:存在|不存在)|NOTICE\s+is\s+(?:not\s+)?(?:present|absent)|(?:有|没有|不存在|无)\s*(?:任何\s*)?(?:[一1]\s*)?NOTICE)', line, re.I) and re.search(ALTERNATIVE, line, re.I):
+                bad.append('NOTICE ambiguous alternative claim')
+            if re.search(UNCERTAIN, line, re.I):
                 bad.append('NOTICE uncertain current answer')
         elif re.search(r'\bNONE\b', line):
             bad.append('NOTICE ambiguous extra NONE')

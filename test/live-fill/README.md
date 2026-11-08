@@ -156,6 +156,10 @@ must match a complete E1729/0x3F pair or the exact original diagnostic;
 finding those tokens somewhere in a longer contradictory field is insufficient.
 An outstanding combined-field heading cannot exempt an unrelated labeled line;
 only a bare diagnostic or an explicit 报错原文 label supplies the original diagnostic.
+Presence alternatives (`存在或不存在`, `present or absent`) and uncertainty
+anywhere in a current NOTICE sentence are rejected. A numeric phrase inside a
+negative `没有 1 条 NOTICE` claim is treated as the same absence assertion,
+not as a second positive count.
 Exit 3 never implies E1729. Conflicting values,
 missing facts and uncertainty fail. The example
 answers in `synthetic.py` document accepted formatting, not alternate prompts.

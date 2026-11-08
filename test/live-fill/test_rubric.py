@@ -445,6 +445,25 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertEqual(parsed['evidence_errors'], [])
         self.assertTrue(any(x.startswith('recall:') for x in parsed['quality_errors']))
 
+    def test_second_order_numeric_and_notice_polarity_bypasses_are_rejected(self):
+        cases = (
+            (14, '本轮共有 --8 条 WARN。'),
+            (4, '本轮共有 --1 条 NOTICE。'),
+            (14, '本轮共有 9WARN条。'),
+            (4, '本轮共有 1. 条 NOTICE。'),
+            (14, '共有 nine 或 8 条 WARN。'),
+            (14, '共有 8 或 nine 条 WARN。'),
+            (4, '本轮共有 1 条 NOTICE，−1。'),
+            (2, '本轮没有 1 条 NOTICE。'),
+            (4, 'NOTICE 存在或不存在。'),
+            (2, 'NOTICE 不存在或存在。'),
+            (2, '已完整读取文件。本轮可能没有 NOTICE。'),
+        )
+        for turn, extra in cases:
+            with self.subTest(turn=turn, extra=extra):
+                base=f'WARN: {3+turn%9}\n'+(NOTICE.get(turn) or 'NONE')
+                self.assertTrue(fill_answer(base+'\n'+extra, turn))
+
     def test_parser_rejects_contradiction_next_to_a_log_example(self):
         items = events(2, self.cwd, 'sid')
         items[-1]['text'] = ('WARN: 5\nNONE\n'
