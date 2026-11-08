@@ -34,7 +34,8 @@ dsh-live-compact --version
 
 - 修复 #34：工具结果事件不再同步执行 shadow/ACL 文件操作，改为事件循环后排队并按 toolCallId 去重；维护开始前会等待已排队捕获，`captureNew` 仍负责补抓和重试。
 - 这条路径避免在模型收到工具结果前被同步磁盘操作卡住；权限失败仍然只拒绝备份，不让宿主 fatal 退出。
-- Windows hosted 验收：Windows 11 ARM、Windows 2022 x64 的 Node 22 core，以及三套 DSH 0.2.0/0.2.1 普通用户 runtime 均通过；Windows 2022 Node 24 首次双进程 cursor 测试出现偶发 299/300，重跑通过。
+- Windows hosted 验收：Windows 11 ARM、Windows 2022 x64 的 Node 22/24 core，以及三套 DSH 0.2.0/0.2.1 普通用户 runtime 均通过；官方 Desktop 普通用户安装、启用、设置保存和重启读取在 Windows 11 ARM 与 Windows 2022 均通过。
+- 同一候选又做了 29 轮持久会话回放：Windows 2022 用时 14 分 05 秒，Windows 11 ARM 用时 17 分 08 秒，含第 21 轮进程重启边界和 58 次工具结果捕获。原报告的 93M/第 29 轮冻结没有在这组受控回放中重现；Node 24 首次双进程 cursor 测试的 299/300 竞态重跑通过，作为后续观察项保留。
 - Config、验证/头脑风暴模式和自动主题分类继续后置，不改变 1.1.2 的小切默认参数。
 
 ## 1.1.2
@@ -50,7 +51,7 @@ dsh-live-compact --version
 
 ### Windows 备份权限
 
-Windows 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM / Server 2022 x64）确认：1.1.1 的 `/inheritance:r /grant:r` 会留下其他主体的显式 ACE，第二个普通用户仍能读取备份。1.1.2 改为完整替换 DACL。本次运行时代码修改后，最终候选仍须重新完成原生 Windows 与 Desktop 验收，结果随最终候选记录。
+Windows 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM / Server 2022 x64）确认：1.1.1 的 `/inheritance:r /grant:r` 会留下其他主体的显式 ACE，第二个普通用户仍能读取备份。1.1.2 改为完整替换 DACL。1.1.3 候选又通过了 hosted Windows core/runtime、官方 Desktop 普通用户安装与设置保存/重启，以及 29 轮持久会话回放；原报告的 93M/第 29 轮冻结未在受控回放中重现，慢存储、超大历史和共享目录压力仍属于后续观察范围。
 
 权限写入改为固定的 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`（Windows PowerShell 5.1 / .NET Framework），使用 `-NoProfile -NonInteractive -EncodedCommand`。脚本固定内嵌在已打包的 `shadow.js`，路径、SID、文件类型通过子进程环境传递，不拼进脚本。当前用户 SID 仍由固定 System32 `whoami.exe` 每进程获取一次，脚本再对照自身 Windows 身份。新建受保护的 DACL，只允许当前用户、SYSTEM、Administrators 完全控制；目录 ACE 带 OI/CI，直接修正的文件 ACE 不带继承标志。只修改 DACL，不提权，不改 owner、group 或 SACL，不使用临时宽松 ACL。写后读取实际 DACL，核验保护位、完整 ACE 数量、SID、Allow、权限及继承标志，收到确认才缓存。工具失败、超时、SID 非法或读回不符都会熔断本进程后续备份，不回退到 chmod。
 
