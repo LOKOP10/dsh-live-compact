@@ -14,13 +14,13 @@
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.2
+dsh plugin --profile headless add dsh-live-compact@1.1.3
 ```
 
 网页端：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.1.2
+dsh plugin --profile web add dsh-live-compact@1.1.3
 ```
 
 想先装到本机看版本：
@@ -29,6 +29,13 @@ dsh plugin --profile web add dsh-live-compact@1.1.2
 npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
+
+## 1.1.3
+
+- 修复 #34：工具结果事件不再同步执行 shadow/ACL 文件操作，改为事件循环后排队并按 toolCallId 去重；维护开始前会等待已排队捕获，`captureNew` 仍负责补抓和重试。
+- 这条路径避免在模型收到工具结果前被同步磁盘操作卡住；权限失败仍然只拒绝备份，不让宿主 fatal 退出。
+- Windows hosted 验收：Windows 11 ARM、Windows 2022 x64 的 Node 22 core，以及三套 DSH 0.2.0/0.2.1 普通用户 runtime 均通过；Windows 2022 Node 24 首次双进程 cursor 测试出现偶发 299/300，重跑通过。
+- Config、验证/头脑风暴模式和自动主题分类继续后置，不改变 1.1.2 的小切默认参数。
 
 ## 1.1.2
 
@@ -299,8 +306,8 @@ GLM 5.3 Flash 用了同一个插件、同一套题。完整跑完的 7 组为 23
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.2
-dsh plugin --profile web add dsh-live-compact@1.1.2
+dsh plugin --profile headless add dsh-live-compact@1.1.3
+dsh plugin --profile web add dsh-live-compact@1.1.3
 ```
 
 想先装到本机看版本：
@@ -313,9 +320,9 @@ dsh-live-compact --version
 上不了 npm 时的镜像安装命令：
 
 ```sh
-dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.2.tgz
-dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.2.tgz
-npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.2.tgz"
+dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.3.tgz
+dsh plugin --profile web add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.3.tgz
+npm install -g --force "https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.3.tgz"
 dsh-live-compact --version
 ```
 
