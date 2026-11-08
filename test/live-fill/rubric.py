@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from contract import FILL, MANIFEST, NOTICE
 from command_audit import bash_input_errors, tool_errors
+from mkfx import build_log
 
 
 def lines(text):
@@ -280,6 +281,9 @@ def fill_answer(text, turn):
         # Only the recognized log excerpt is context. Audit surrounding count
         # claims even when they share its citation/table row; keep NOTICE intact.
         supplemental, excerpts = re.subn(r'\bWARN ledger drift turn=\d+ n=\d+\b', ' ', line)
+        for citation in re.finditer(r'\bWARN ledger drift turn=(\d+) n=(\d+)\b', line):
+            if int(citation[1]) != turn or int(citation[2]) >= 3 + turn % 9:
+                bad.append('WARN false supplemental citation')
         if re.search(r"WARN", supplemental, re.I):
             for value in warn_claim_values(supplemental):
                 # A removed inline example can leave only its comma/label/quotes.
@@ -287,6 +291,15 @@ def fill_answer(text, turn):
                 if excerpts and citation_value:
                     value = citation_value[1]
                 value = re.sub(r'[:：]\s*$', '', value)
+                line_numbers = re.search(r'(?:行号|line numbers?)\s*([0-9][0-9\s,，、]*)', value, re.I)
+                if line_numbers:
+                    cited = [int(x) for x in re.findall(r'\d+', line_numbers[1])]
+                    fixture_lines = build_log(turn)[0].splitlines()
+                    warn_lines = {n for n, text_line in enumerate(fixture_lines, 1)
+                                  if text_line.startswith('WARN ')}
+                    if (not cited or len(set(cited)) != len(cited) or
+                            any(n not in warn_lines for n in cited)):
+                        bad.append('WARN false supplemental citation')
                 if not warn_value(value, 3 + turn % 9):
                     bad.append('WARN ambiguous/contradictory current answer')
                 elif re.match(WARN_LABEL + r'\s*(?:[:：=为共]|\bis\b)', supplemental, re.I):

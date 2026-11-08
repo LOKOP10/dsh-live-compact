@@ -228,8 +228,9 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                                     and check_evidence(pair[0]['input'].get('command', ''), ev['result']))
                 if any(exits) and not expected_failure:
                     command = pair[0]['input'].get('command', '')
+                    diagnostic = ev['result'][len('[stderr]\n'):] if ev['result'].startswith('[stderr]\n') else ev['result']
                     if (command == 'git status --short --branch' and
-                            ev['result'] == 'fatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]'):
+                            diagnostic == 'fatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]'):
                         quality.append('model diagnostic command failed: git status outside repository')
                     else:
                         bad.append('tool command failed')

@@ -19,6 +19,10 @@ class AnswerGrammarTests(unittest.TestCase):
                 '**NOTICE：NONE**（已按大小写不敏感复核，文件中无 notice 字样）')
         self.assertEqual(fill_answer(text, 3), [])
 
+    def test_explanatory_warn_citations_still_match_the_fixture(self):
+        self.assertTrue(fill_answer('WARN 条数：6（行号 9999）\nNOTICE：NONE', 3))
+        self.assertTrue(fill_answer('WARN 条数：6，例如 WARN ledger drift turn=999 n=1\nNOTICE：NONE', 3))
+
     def test_supporting_prose_and_markdown(self):
         for text in (
             '已读取文件，结果如下。\n- **WARN 条数：5**\n- **NOTICE 原文行：NONE**\n文件其余内容为 INFO 心跳。',
@@ -862,7 +866,7 @@ class ToolEvidenceTests(unittest.TestCase):
         call = dict(type='tool_call', callId='git-status', tool='bash',
                     input={'command': 'git status --short --branch', 'workdir': str(self.cwd)})
         result = dict(type='tool_result', callId='git-status', status='completed',
-                      result='fatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]')
+                      result='[stderr]\nfatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]')
         items[3:3] = [call, result]
         parsed = self.parsed(items, 2)
         self.assertEqual(parsed['evidence_errors'], [])
