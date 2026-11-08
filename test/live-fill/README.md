@@ -125,9 +125,12 @@ entire expected original line, with no suffix. Clearly historical named-part
 sequences are context; explicit current labels override that exemption.
 Supplemental citations cannot add false NOTICE lines or conflicting counts.
 Supplemental counts audit the whole signed/decimal/exponent token rather than
-its trailing digits. NOTICE count annotations use bounded read/verification
+its trailing digits. WARN and NOTICE share the scanner; malformed numeric-looking
+tokens and signed/worded alternatives fail instead of being silently skipped.
+Numeric commas are retained inside tokens. NOTICE count annotations use bounded read/verification
 phrases; words such as `actually one` cannot override a verified zero. Accepted
-NOTICE presence/absence sentences include their `not` polarity. The special
+NOTICE presence/absence sentences include their `not` polarity; Chinese 没有一条
+is consumed as an absence claim, without reusing the internal 有一条 substring. The special
 read summary names only the current `partN.log`, verifies its 520-line fixture
 and total matches, and cannot consume unrelated current assertions in a prefix.
 An unrelated tool does not prove
@@ -151,6 +154,8 @@ its value, one unique assertion per field. Supporting prose supplies no missing
 facts; explicit contradictions still fail. Combined error-code/shard fields
 must match a complete E1729/0x3F pair or the exact original diagnostic;
 finding those tokens somewhere in a longer contradictory field is insufficient.
+An outstanding combined-field heading cannot exempt an unrelated labeled line;
+only a bare diagnostic or an explicit 报错原文 label supplies the original diagnostic.
 Exit 3 never implies E1729. Conflicting values,
 missing facts and uncertainty fail. The example
 answers in `synthetic.py` document accepted formatting, not alternate prompts.

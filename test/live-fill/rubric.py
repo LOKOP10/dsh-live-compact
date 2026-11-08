@@ -16,6 +16,9 @@ UNCERTAIN = r"\b(?:maybe|perhaps|guess|probably|possibly|uncertain|unsure|unclea
 ALTERNATIVE = r'\bor\b|或者|或'
 WARN_LABEL = r"(?:(?:当前|本次|current(?: turn)?)\s*)?WARN(?:\s*(?:条数|数量|count))?"
 NOTICE_LABEL = r"NOTICE(?:\s*(?:原文行?|original(?: line)?|line))?"
+# Consume numeric-looking tokens whole, including malformed/unsupported forms.
+# A count noun may be adjacent; other ASCII suffixes remain part of the token.
+NUMERIC_TOKEN = r'(?<![a-zA-Z0-9_.+−-])[+−-]?(?:\d|\.\d)(?:(?!(?:WARN|NOTICE)\b)[a-zA-Z0-9_.+−,，-])*'
 
 
 def cells(line):
@@ -126,19 +129,18 @@ def counts_before_warn(line):
                       r'(?:\s*(?:条目|条|行)|\s+(?:lines?|entr(?:y|ies)|rows?|records?|messages?)\b)?', re.I)
     # A signed, fractional, grouped or exponential number must never donate
     # its last digit sequence as a separate integer count.
-    number = r'(?<![a-zA-Z0-9_.+−-])[+−-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:[eE][+-]?\d+)?(?![a-zA-Z0-9_.])'
-    for match in re.finditer(number, line):
+    for match in re.finditer(NUMERIC_TOKEN, line, re.I):
         before_end = annotation_end(match.end())
         counted = noun.match(line, before_end)
         if counted:
             after_end = annotation_end(counted.end())
             # A nearby alternative belongs to this claim; stop at sentence or
             # clause boundaries rather than consuming unrelated later prose.
-            alternative = re.match(r'[,，:：]?\s*(?:'+ALTERNATIVE+r'|/)\s*\d+',
+            alternative = re.match(r'[,，:：]?\s*(?:'+ALTERNATIVE+r'|/)\s*\S+',
                                    line[after_end:], re.I)
             if alternative:
                 after_end += alternative.end()
-            yield line[match.start():before_end] + line[counted.end():after_end]
+            yield match[0], line[match.start():before_end] + line[counted.end():after_end]
 
 
 def notice_count_values(line):
@@ -149,7 +151,9 @@ def notice_count_values(line):
             stack.append(char)
         elif char in ')）' and stack:
             stack.pop()
-        if not stack and (char in ',，;；。|' or
+        numeric_comma = (char in ',，' and index > 0 and index+1 < len(line)
+                         and line[index-1].isdigit() and line[index+1].isdigit())
+        if not stack and not numeric_comma and (char in ',，;；。|' or
                           (char == '.' and (index + 1 == len(line) or line[index + 1].isspace()))):
             clauses.append(line[start:index])
             start = index + 1
@@ -164,7 +168,7 @@ def notice_count_values(line):
             values.append(previous+' '+clause)
         for match in re.finditer(r'NOTICE\s*(?:(?:(?:lines?|rows?|entries|matches)\s+)?count|条数|数量)\s*(?:[:：=为]|\bis\b)\s*', clause, re.I):
             values.append(clause[match.end():])
-        for match in re.finditer(r'(?<![a-zA-Z0-9_])[+-]?\d+(?:[.\w]*\d+)?', clause):
+        for match in re.finditer(NUMERIC_TOKEN, clause, re.I):
             end, depth = match.end(), 0
             while end < len(clause):
                 char = clause[end]
@@ -267,8 +271,8 @@ def fill_answer(text, turn):
                 bad.append('WARN ambiguous/uncertain current answer')
             if re.search(r'\d+\s*(?:' + ALTERNATIVE + r'|/)\s*\d+\s*(?:条\s*)?WARN\b', supplemental, re.I):
                 bad.append('WARN ambiguous supplemental count')
-            for count in counts_before_warn(supplemental):
-                if not warn_value(count, 3 + turn % 9):
+            for token, count in counts_before_warn(supplemental):
+                if not re.fullmatch(r'0|[1-9]\d*', token) or not warn_value(count, 3 + turn % 9):
                     bad.append('WARN contradictory supplemental count')
         if line != before_history:
             # Only an empty, verified history clause may precede a citation.
@@ -295,16 +299,23 @@ def fill_answer(text, turn):
             if explanation and (re.search(UNCERTAIN, explanation, re.I) or
                                 not re.fullmatch(r"(?:文件中)?(?:没有任何|无|没有)\s*NOTICE\s*(?:行|条目)|no NOTICE (?:lines?|entries)", explanation, re.I)):
                 bad.append('NOTICE ambiguous explanation')
-        elif core.startswith('NOTICE ') and not re.match(r'NOTICE\s+(?:(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b|条数|数量)', core, re.I):
+        elif core.startswith('NOTICE ') and not re.match(r'NOTICE\s+(?:(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b|条数|数量|不存在|存在|为)', core, re.I):
             notice.append(candidate)  # original NOTICE bytes, including any false suffix
         elif labeled and notice_label(labeled[1]):
             bad.append('NOTICE ambiguous/contradictory current answer')
         elif re.search(r"NOTICE", line, re.I):
             # Ordinary prose isn't an answer field. Concrete extra originals,
             # counts, absence/presence claims and uncertainty are still audited.
-            absent = bool(re.search(r'(?:没有|不存在|无|\bno\b)\s*(?:任何\s*)?NOTICE|NOTICE\s*(?:不存在|为 NONE|is NONE|is absent)', line, re.I))
-            present = bool(re.search(r'NOTICE\s*(?:存在|is present)|(?:有|\bthere is\s*)\s*(?:一|1)\s*(?:条\s*)?NOTICE', line, re.I))
-            if (absent and turn in NOTICE) or (present and turn not in NOTICE):
+            # Consume the complete Chinese verb first: the affirmative 有
+            # inside 没有 must never become an independent presence claim.
+            for claim in re.finditer(r'(没有|不存在|无|有)\s*(?:任何\s*)?(?:[一1]\s*(?:条\s*)?)?NOTICE(?![a-zA-Z0-9_])', line, re.I):
+                if (claim[1] == '有') != (turn in NOTICE):
+                    bad.append('NOTICE contradictory supplemental claim')
+            for claim in re.finditer(r'NOTICE\s*(不存在|存在|为\s*NONE)', line, re.I):
+                if (claim[1] == '存在') != (turn in NOTICE):
+                    bad.append('NOTICE contradictory supplemental claim')
+            if ((re.search(r'\bno\s+NOTICE\b', line, re.I) and turn in NOTICE) or
+                    (re.search(r'\bthere is\s+(?:one|1)\s+NOTICE\b', line, re.I) and turn not in NOTICE)):
                 bad.append('NOTICE contradictory supplemental claim')
             for claim in re.finditer(r'\bNOTICE\s+is\s+(not\s+)?(present|absent|NONE)\b', line, re.I):
                 exists = (claim[2].lower() == 'present') != bool(claim[1])
@@ -434,10 +445,11 @@ def fields(text, name):
             continue
         # A quoted full original check diagnostic also explicitly supplies code
         # and shard; it does not supply unrelated facts from unstructured prose.
-        if pending == 'combined' or label == '报错原文':
+        if label == '报错原文':
             if value == 'E1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)':
                 for key in ('报错码|code', '分片|shard'):
                     diagnostic[key] = True
+                pending = None
                 continue
             if label == '报错原文':
                 bad.append(f'{name}: incorrect original diagnostic')

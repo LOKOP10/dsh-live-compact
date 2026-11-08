@@ -271,6 +271,40 @@ class AnswerGrammarTests(unittest.TestCase):
                         self.assertTrue(any(x.startswith('WARN ') for x in errors))
             self.assertEqual(fill_answer(base+f'\n共有 {count} 条 WARN。', turn), [])
 
+    def test_warn_alternatives_and_numeric_tokens_are_complete(self):
+        base = 'WARN: 8\nNOTICE: NONE'
+        for extra in ('本轮共有 8 条 WARN，或 -9。', 'There are 8 WARN lines, or +9.',
+                      '共有 8 条 WARN / −9。', '共有 8 条 WARN，或者 nine。',
+                      '本轮共有 1e−8 条 WARN。', '共有 0x8 条 WARN。',
+                      '共有 8. 条 WARN。', '共有 8foo 条 WARN。'):
+            with self.subTest(extra=extra):
+                self.assertTrue(fill_answer(base+'\n'+extra, 14))
+
+    def test_notice_numeric_tokens_cannot_donate_integer_suffixes(self):
+        base = f'WARN: 7\nNOTICE: {NOTICE[4]}'
+        for number in ('1e+1', '−1', '1e−1', '0x1', '1foo', '1.0', '+1', '1,1'):
+            with self.subTest(number=number):
+                self.assertTrue(fill_answer(base+f'\n本轮共有 {number} 条 NOTICE。', 4))
+
+    def test_chinese_notice_absence_cannot_supply_positive_substring(self):
+        for turn in (2, 4):
+            base = f'WARN: {3+turn%9}\nNOTICE: {NOTICE.get(turn, "NONE")}'
+            for absent in ('本轮没有一条 NOTICE。', '本轮没有任何一条 NOTICE。',
+                           '本轮无一条 NOTICE。', '本轮不存在 NOTICE。'):
+                with self.subTest(turn=turn, absent=absent):
+                    self.assertEqual(not fill_answer(base+'\n'+absent, turn), turn not in NOTICE)
+            for present in ('本轮有一条 NOTICE。', 'NOTICE 存在。'):
+                self.assertEqual(not fill_answer(base+'\n'+present, turn), turn in NOTICE)
+
+    def test_combined_heading_does_not_exempt_an_unrelated_label(self):
+        for name, sample in (('recall', RECALL), ('status', STATUS)):
+            for label in ('当前端口为 8642', 'The port is 8642', 'reviewer is Other'):
+                with self.subTest(name=name, label=label):
+                    self.assertTrue(fields(sample+'\n## 报错码与分片\n'+label+': '+CHECK, name))
+            base = sample.replace('code: E1729\nshard: 0x3F\n', '')
+            self.assertEqual(fields(base+'\n## 报错码与分片\n'+CHECK, name), [])
+            self.assertEqual(fields(base+'\n## 报错码与分片\n报错原文: '+CHECK, name), [])
+
     def test_notice_annotations_cannot_reverse_count_in_words(self):
         for turn in (2, 4):
             count, other = int(turn in NOTICE), 'zero' if turn in NOTICE else 'one'
@@ -383,7 +417,12 @@ class ToolEvidenceTests(unittest.TestCase):
             claims = (
                 (f'共有 -{w} 条 WARN。', 'WARN'),
                 (f'共有 1.{w} 条 WARN。', 'WARN'),
+                (f'共有 {w} 条 WARN，或 -{w+1}。', 'WARN'),
+                (f'共有 1e−{w} 条 WARN。', 'WARN'),
                 (f'NOTICE count: {n} (actually '+('zero' if n else 'one')+')', 'NOTICE'),
+                (f'共有 1e+{n} 条 NOTICE。', 'NOTICE'),
+                (f'共有 −{n} 条 NOTICE。', 'NOTICE'),
+                ('本轮'+('没有' if n else '有')+'一条 NOTICE。', 'NOTICE'),
                 ('NOTICE is not '+('present' if n else 'absent')+'.', 'NOTICE'),
                 (f'已读取 part{turn}.log；当前 WARN: {w+1}'
                  f'（520 行，已做大小写不敏感复核，{w+n} 处匹配 = {w} 条 WARN + {n} 条 NOTICE）：', 'WARN'),
@@ -398,6 +437,13 @@ class ToolEvidenceTests(unittest.TestCase):
                     self.assertFalse(parsed[kind.lower()+'_correct'])
                     self.assertTrue(parsed['quality_errors'])
                     self.assertEqual(len(parsed['usage']), 2)
+
+    def test_combined_heading_conflict_reaches_real_recall_quality(self):
+        items = events(28, self.cwd, 'sid')
+        items[-1]['text'] += '\n## 报错码与分片\n当前端口为 8642: '+CHECK
+        parsed = self.parsed(items, 28)
+        self.assertEqual(parsed['evidence_errors'], [])
+        self.assertTrue(any(x.startswith('recall:') for x in parsed['quality_errors']))
 
     def test_parser_rejects_contradiction_next_to_a_log_example(self):
         items = events(2, self.cwd, 'sid')
