@@ -454,7 +454,6 @@ class ToolEvidenceTests(unittest.TestCase):
             (14, '共有 nine 或 8 条 WARN。'),
             (14, '共有 8 或 nine 条 WARN。'),
             (4, '本轮共有 1 条 NOTICE，−1。'),
-            (2, '本轮没有 1 条 NOTICE。'),
             (4, 'NOTICE 存在或不存在。'),
             (2, 'NOTICE 不存在或存在。'),
             (2, '已完整读取文件。本轮可能没有 NOTICE。'),
@@ -463,6 +462,27 @@ class ToolEvidenceTests(unittest.TestCase):
             with self.subTest(turn=turn, extra=extra):
                 base=f'WARN: {3+turn%9}\n'+(NOTICE.get(turn) or 'NONE')
                 self.assertTrue(fill_answer(base+'\n'+extra, turn))
+
+    def test_third_order_numeric_and_presence_bypasses_are_rejected(self):
+        cases = (
+            (2, '本轮没有 1 条 NOTICE。'),
+            (2, '本轮没有 NOTICE；NOTICE count is 5。'),
+            (4, 'NOTICE 存在/不存在。'),
+            (4, 'NOTICE is present/absent。'),
+            (4, '本轮共有 zero 或者 1 条 NOTICE。'),
+            (14, '共有 nine 或者 8 条 WARN。'),
+            (14, 'nine WARN or 8。'),
+            (4, '本轮共有 NOTICE1条。'),
+            (14, '本轮共有 WARN8条。'),
+            (4, '本轮共有 1 条 NOTICE，−1。'),
+            (4, '本轮共有 −−1 条 NOTICE。'),
+            (4, '本轮共有 +-1 条 NOTICE。'),
+        )
+        for turn, extra in cases:
+            with self.subTest(turn=turn, extra=extra):
+                base=f'WARN: {3+turn%9}\n'+(NOTICE.get(turn) or 'NONE')
+                accepted = not fill_answer(base+'\n'+extra, turn)
+                self.assertEqual(accepted, turn == 2 and extra == '本轮没有 1 条 NOTICE。')
 
     def test_parser_rejects_contradiction_next_to_a_log_example(self):
         items = events(2, self.cwd, 'sid')
