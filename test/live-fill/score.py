@@ -7,7 +7,7 @@ from pathlib import Path
 from contract import (MANIFEST, GROUPS, ROUNDS, FILL, fingerprints, read_json, sha,
                       validate_contract, write_json)
 from mkfx import build_log, expected_inventory
-from rubric import behavior, check_command, check_evidence, fields, fill_answer
+from rubric import behavior, check_activity, check_command, check_evidence, fields, fill_answer
 
 MAX_LOG_BYTES = 16 * 1024 * 1024
 CACHE_FIELDS = ('cacheReadTokens', 'cacheWriteTokens')
@@ -259,8 +259,14 @@ def parse_turn(path, turn, cwd, expected_sid=None):
         check_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash'
                        and same_path(c['input'].get('workdir', str(cwd)), cwd, cwd)
                        and check_command(c['input'].get('command', ''))]
+        observed_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash'
+                          and same_path(c['input'].get('workdir', str(cwd)), cwd, cwd)
+                          and check_activity(c['input'].get('command', ''))]
         if len(check_pairs) != 1 or check_pairs[0][1] is None:
-            bad.append('missing once-only check execution')
+            if len(observed_pairs) == 1 and observed_pairs[0][1] is not None and observed_pairs[0][1].get('status') == 'completed':
+                bad.append('noncanonical once-only check execution')
+            else:
+                bad.append('missing once-only check execution')
         else:
             body = check_pairs[0][1]['result']
             if (check_pairs[0][1]['status'] != 'completed' or

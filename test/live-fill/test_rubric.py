@@ -760,6 +760,30 @@ class ToolEvidenceTests(unittest.TestCase):
             calls = [{'tool':'bash', 'input':{'command':c}} for c in commands]
             self.assertIn('repeated or unauditable check.sh execution', behavior(turn, calls, self.snapshot, self.initial))
 
+    def test_noncanonical_execution_is_reported_without_calling_it_missing(self):
+        items = events(1, self.cwd, 'sid')
+        call = next(x for x in items if x['type'] == 'tool_call')
+        result = next(x for x in items if x['type'] == 'tool_result')
+        call['input']['command'] = './check.sh; echo "exit=$?"'
+        result['result'] = CHECK + '\nexit=3'
+        parsed = self.parsed(items, 1)
+        self.assertIn('noncanonical once-only check execution', parsed['evidence_errors'])
+        self.assertNotIn('missing once-only check execution', parsed['evidence_errors'])
+
+    def test_two_observed_checks_remain_a_hard_failure(self):
+        items = events(1, self.cwd, 'sid')
+        first_call = next(x for x in items if x['type'] == 'tool_call')
+        first_result = next(x for x in items if x['type'] == 'tool_result')
+        first_call['input']['command'] = './check.sh'
+        first_result['result'] = CHECK + '\n[exit code: 3]'
+        second_call = copy.deepcopy(first_call)
+        second_result = copy.deepcopy(first_result)
+        second_call['callId'] = second_result['callId'] = 'check-2'
+        items[5:5] = [second_call, second_result]
+        parsed = self.parsed(items, 1)
+        self.assertIn('missing once-only check execution', parsed['evidence_errors'])
+        self.assertIn('repeated check.sh execution', parsed['quality_errors'])
+
     def test_check_evidence_requires_exact_error_and_status(self):
         for command, body in (('./check.sh', CHECK+'\n[exit code: 0]'),
                               ('./check.sh', CHECK+'\n[exit code: 7]'),
