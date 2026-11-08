@@ -217,10 +217,27 @@ def notice_count_value(value, expected):
                                            ''.join(explanation), re.I))
 
 
+def warn_citation_errors(text, turn):
+    fixture_lines = build_log(turn)[0].splitlines()
+    warn_lines = {n for n, text_line in enumerate(fixture_lines, 1)
+                  if text_line.startswith('WARN ')}
+    bad = []
+    for line in lines(text):
+        for note in re.finditer(r'(?:行号|line numbers?)\s*([^\n]*?[0-9０-９][0-9０-９\s,，、]*)', line, re.I):
+            cited = [int(x) for x in re.findall(r'\d+', note[1])]
+            if (not cited or len(set(cited)) != len(cited) or
+                    any(n not in warn_lines for n in cited)):
+                bad.append('WARN false supplemental citation')
+        for citation in re.finditer(r'\bWARN ledger drift turn=(\d+) n=(\d+)\b', line):
+            if int(citation[1]) != turn or int(citation[2]) >= 3 + turn % 9:
+                bad.append('WARN false supplemental citation')
+    return bad
+
+
 def fill_answer(text, turn):
     warn, notice = [], []
     cited_notice = []
-    bad = []
+    bad = warn_citation_errors(text, turn)
     for line in lines(text):
         # Explicit count prose must consume the complete token. This prevents
         # malformed values, word alternatives, and adjacent nouns from being
@@ -281,9 +298,6 @@ def fill_answer(text, turn):
         # Only the recognized log excerpt is context. Audit surrounding count
         # claims even when they share its citation/table row; keep NOTICE intact.
         supplemental, excerpts = re.subn(r'\bWARN ledger drift turn=\d+ n=\d+\b', ' ', line)
-        for citation in re.finditer(r'\bWARN ledger drift turn=(\d+) n=(\d+)\b', line):
-            if int(citation[1]) != turn or int(citation[2]) >= 3 + turn % 9:
-                bad.append('WARN false supplemental citation')
         if re.search(r"WARN", supplemental, re.I):
             for value in warn_claim_values(supplemental):
                 # A removed inline example can leave only its comma/label/quotes.
@@ -291,15 +305,6 @@ def fill_answer(text, turn):
                 if excerpts and citation_value:
                     value = citation_value[1]
                 value = re.sub(r'[:：]\s*$', '', value)
-                line_number_notes = re.findall(r'(?:行号|line numbers?)\s*([0-9０-９][0-9０-９\s,，、]*)', value, re.I)
-                for line_number_note in line_number_notes:
-                    cited = [int(x) for x in re.findall(r'\d+', line_number_note)]
-                    fixture_lines = build_log(turn)[0].splitlines()
-                    warn_lines = {n for n, text_line in enumerate(fixture_lines, 1)
-                                  if text_line.startswith('WARN ')}
-                    if (not cited or len(set(cited)) != len(cited) or
-                            any(n not in warn_lines for n in cited)):
-                        bad.append('WARN false supplemental citation')
                 if not warn_value(value, 3 + turn % 9):
                     bad.append('WARN ambiguous/contradictory current answer')
                 elif re.match(WARN_LABEL + r'\s*(?:[:：=为共]|\bis\b)', supplemental, re.I):
