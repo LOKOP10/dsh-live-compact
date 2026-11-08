@@ -261,6 +261,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                        and check_command(c['input'].get('command', ''))]
         observed_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash'
                           and same_path(c['input'].get('workdir', str(cwd)), cwd, cwd)
+                          and isinstance(c['input'].get('command', ''), str)
                           and check_activity(c['input'].get('command', ''))]
         if len(check_pairs) != 1 or check_pairs[0][1] is None:
             if len(observed_pairs) == 1 and observed_pairs[0][1] is not None and observed_pairs[0][1].get('status') == 'completed':

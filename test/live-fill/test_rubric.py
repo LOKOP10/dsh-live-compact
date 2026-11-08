@@ -784,6 +784,16 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertIn('missing once-only check execution', parsed['evidence_errors'])
         self.assertIn('repeated check.sh execution', parsed['quality_errors'])
 
+    def test_malformed_check_command_is_rejected_without_reading_stdin(self):
+        for value in (None, 7, ['.','/check.sh']):
+            with self.subTest(value=value):
+                items = events(1, self.cwd, 'sid')
+                call = next(x for x in items if x['type'] == 'tool_call')
+                call['input']['command'] = value
+                parsed = self.parsed(items, 1)
+                self.assertIn('missing once-only check execution', parsed['evidence_errors'])
+                self.assertNotIn('noncanonical once-only check execution', parsed['evidence_errors'])
+
     def test_check_evidence_requires_exact_error_and_status(self):
         for command, body in (('./check.sh', CHECK+'\n[exit code: 0]'),
                               ('./check.sh', CHECK+'\n[exit code: 7]'),
