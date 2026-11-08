@@ -477,8 +477,10 @@ def simple_audit(words, turn, depth, stdin_paths=UNBOUND_STDIN):
 
 def bash_input_errors(args, cwd=None):
     """Shared by the ordinary audit and the two bounded Bash exceptions."""
-    if (not isinstance(args, dict) or set(args) - {'command', 'workdir', 'description'} or
+    if (not isinstance(args, dict) or set(args) - {'command', 'workdir', 'description', 'timeoutMs'} or
             not isinstance(args.get('command'), str) or not args['command'].strip()):
+        return [OPAQUE]
+    if 'timeoutMs' in args and (type(args['timeoutMs']) is not int or not 1 <= args['timeoutMs'] <= 180000):
         return [OPAQUE]
     if 'description' in args and (not isinstance(args['description'], str) or not args['description'].strip()):
         return [OPAQUE]

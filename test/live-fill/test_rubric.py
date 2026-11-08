@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from contract import MANIFEST, NOTICE, sha
 from mkfx import write_workspace
 from rubric import behavior, check_activity, check_command, check_evidence, fields, fill_answer
-from command_audit import OPAQUE, tool_errors
+from command_audit import OPAQUE, tool_errors, bash_input_errors
 from score import parse_turn
 from synthetic import CHECK, HIDDEN, RECALL, STATUS, events, write_events
 
@@ -510,6 +510,13 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertFalse(parsed['warn_correct'])
         self.assertTrue(parsed['notice_correct'])
         self.assertIn('WARN contradictory supplemental count', parsed['quality_errors'])
+
+    def test_bounded_timeout_metadata_is_observable_but_not_a_tool_error(self):
+        args = {'command': './check.sh', 'description': 'run once', 'workdir': str(self.cwd), 'timeoutMs': 120000}
+        self.assertEqual(bash_input_errors(args, self.cwd), [])
+        for value in (0, -1, 180001, 1.5, '120000'):
+            bad = dict(args, timeoutMs=value)
+            self.assertIn('unauditable tool behavior; independent command review required', bash_input_errors(bad, self.cwd))
 
     def test_cited_warn_count_conflict_is_quality_failure(self):
         items = events(2, self.cwd, 'sid')
@@ -1147,7 +1154,7 @@ class ToolEvidenceTests(unittest.TestCase):
             self.assertEqual(behavior(turn, [{'tool':'bash', 'input':args}], snapshot, self.initial), [])
             for field, value in (('description', None), ('description', {}), ('description', 3),
                                  ('description', ''), ('description', '  '),
-                                 ('script', 'rm scratch'), ('timeoutMs', 1000),
+                                 ('script', 'rm scratch'),
                                  ('run_in_background', True), ('sandbox_permissions', 'unrestricted')):
                 with self.subTest(command=command, field=field, value=value):
                     bad = behavior(turn, [{'tool':'bash', 'input':dict(args, **{field:value})}],
