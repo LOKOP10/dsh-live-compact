@@ -217,6 +217,23 @@ def notice_count_value(value, expected):
                                            ''.join(explanation), re.I))
 
 
+def citation_numbers_after_label(line, position):
+    tail = line[position:].lstrip()
+    if tail.startswith(('(', '（')):
+        opening, closing = tail[0], ')' if tail[0] == '(' else '）'
+        depth = 0
+        for index, char in enumerate(tail):
+            if char == opening:
+                depth += 1
+            elif char == closing:
+                depth -= 1
+                if depth == 0:
+                    return [int(x) for x in re.findall(r'\d+', tail[1:index])]
+        return [int(x) for x in re.findall(r'\d+', tail[1:])]
+    match = re.match(r'[0-9０-９][0-9０-９\s,，、]*', tail)
+    return [int(x) for x in re.findall(r'\d+', match[0])] if match else []
+
+
 def warn_citation_errors(text, turn):
     fixture_lines = build_log(turn)[0].splitlines()
     warn_lines = {n for n, text_line in enumerate(fixture_lines, 1)
@@ -224,7 +241,7 @@ def warn_citation_errors(text, turn):
     bad = []
     for line in lines(text):
         for note in re.finditer(r'(?:行号|line numbers?)', line, re.I):
-            cited = [int(x) for x in re.findall(r'\d+', line[note.end():])]
+            cited = citation_numbers_after_label(line, note.end())
             if not cited:
                 continue
             if (not cited or len(set(cited)) != len(cited) or
