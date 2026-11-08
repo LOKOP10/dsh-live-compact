@@ -4,6 +4,15 @@ from pathlib import Path
 from command_audit import IONumber,OPAQUE,STATUS,shell_words,tool_errors
 
 
+def stderr_commands():
+    inner='python3 -I -c '+shlex.quote('assert False, open("sample.csv").read()')+' | true'
+    return ["bash -c 'cat sample.csv >&2 | true' 2>&1 | grep ','",
+            "bash -c 'cat sample.csv 1>&2 | true' 2>&1 | grep ','",
+            'bash -c '+shlex.quote(inner)+" 2>&1 | grep ','",
+            'bash -c '+shlex.quote(inner)+" 2> capture.txt; grep ',' capture.txt",
+            'bash -c '+shlex.quote(inner)+" 2>> capture.txt; grep ',' capture.txt"]
+
+
 class ShellSemanticsTests(unittest.TestCase):
     def bash(self,root,command):
         return subprocess.check_output(['/bin/bash','--noprofile','--norc','-c',command],cwd=root,
@@ -84,3 +93,10 @@ class ShellSemanticsTests(unittest.TestCase):
             # Bash selects only the final stdin redirect; never attribute this
             # different behavior to the grammar used by the actual DSH tool.
             self.assertEqual(self.bash(root,'cat < sample.csv < plain.txt'),'plain'+chr(10))
+
+    def test_stderr_escape_routes_cannot_erase_csv_provenance(self):
+        for command in stderr_commands():
+            with self.subTest(command=command),tempfile.TemporaryDirectory()as temp:
+                root=Path(temp);(root/'sample.csv').write_text('a,b'+chr(10)+'1,2'+chr(10))
+                output=self.bash(root,command);self.assertIn('a,b'+chr(10)+'1,2',output)
+                self.assertIn(OPAQUE,tool_errors({'tool':'bash','input':{'command':command}},14,cwd=root))

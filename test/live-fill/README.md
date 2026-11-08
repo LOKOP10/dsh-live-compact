@@ -220,6 +220,10 @@ descriptor; quoting it or separating it with whitespace leaves an ordinary
 argument. Protected paths are compared case-insensitively as a conservative rule
 on case-insensitive filesystems. Real Bash argv and filesystem regressions cover
 these distinctions, including modify-and-restore attempts before a snapshot.
+The general branch rejects descriptor copies and explicit stderr redirects,
+including `>&2`, `2>&1` and `2>file`: it tracks stdout sources, not a second stderr
+stream through nested wrappers. The separately verified one-shot `check.sh`
+receipt path still supports its bounded stdout/stderr capture forms.
 
 DSH glob accepts `pattern` and optional `path`. It enumerates names through
 fixed `rg --files` argv; it never provides content-read evidence. The bounded

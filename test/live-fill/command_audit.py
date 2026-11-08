@@ -339,6 +339,7 @@ def simple_audit(words, turn, depth, stdin_paths=UNBOUND_STDIN):
                 return bad + [OPAQUE], None
             target = args.pop(0)
             if token == '>&':
+                bad.append(OPAQUE)  # This grammar does not model stderr provenance.
                 if target not in ('1', '2'):
                     bad.append(OPAQUE)
             else:
@@ -355,6 +356,8 @@ def simple_audit(words, turn, depth, stdin_paths=UNBOUND_STDIN):
                 return bad + [OPAQUE], None
             if (token == '0') != (args[0] == '<'):
                 bad.append(OPAQUE)
+            if token == '2':
+                bad.append(OPAQUE)  # stderr can bypass a nested stdout pipeline.
             continue
         else:
             operands.append(token)

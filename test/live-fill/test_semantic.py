@@ -351,6 +351,29 @@ class SemanticTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):export(self.policy,self.blind/f'zsh-packet-{index}.json',self.base/f'zsh-map-{index}.json')
                 with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):verify(self.policy,self.packet,self.mapping,self.receipts)
 
+    def test_stderr_escape_is_nonwaivable(self):
+        from test_shell_semantics import stderr_commands
+        root=self.roots['ds/candidate'];path=root/'runs/spine-1/t14.jsonl';original=[json.loads(x)for x in path.read_text().splitlines()];text='a,b'+chr(10)+'1,2'+chr(10)
+        baseline=score_cell(root);verify(self.policy,self.packet,self.mapping,self.receipts)
+        @contextlib.contextmanager
+        def snapshots():
+            originals={}
+            try:
+                for turn in range(14,32):
+                    snap=root/f'runs/spine-1/t{turn}.snapshot.json';meta=root/f'runs/spine-1/t{turn}.meta.json';originals[snap]=snap.read_bytes();originals[meta]=meta.read_bytes()
+                    value=read_json(snap);value['files']['sample.csv']=sha(text.encode());value['texts']['sample.csv']=text;data=json.dumps(value).encode();snap.write_bytes(data)
+                    value=read_json(meta);value['snapshot_sha256']=sha(data);meta.write_text(json.dumps(value))
+                yield
+            finally:
+                for file,data in originals.items():file.write_bytes(data)
+        for index,command in enumerate(stderr_commands()[:3]):
+            items=copy.deepcopy(original);position=next(i for i,e in enumerate(items)if e.get('phase')=='step_end')
+            items[position:position]=[dict(type='tool_call',callId='stderr-write',tool='write',input={'file_path':'sample.csv','content':text}),dict(type='tool_result',callId='stderr-write',status='completed',result='[exit code: 0]'),dict(type='tool_call',callId='stderr-route',tool='bash',input={'command':command}),dict(type='tool_result',callId='stderr-route',status='completed',result='[exit code: 0]')]
+            with self.subTest(command=command),self.changed_events(path,items),snapshots():
+                report=score_cell(root);self.assertTrue(report['evidence_pass'],report['evidence_errors']);self.assertEqual((report['warn_correct'],report['notice_correct']),(baseline['warn_correct'],baseline['notice_correct']))
+                with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):export(self.policy,self.blind/f'stderr-packet-{index}.json',self.base/f'stderr-map-{index}.json')
+                with self.assertRaisesRegex(ValueError,'hard evidence/tool/behavior failure'):verify(self.policy,self.packet,self.mapping,self.receipts)
+
     def test_absent_full_run_or_stale_run_rejected(self):
         path = self.extra_path
         path.rename(path.with_suffix('.held'))

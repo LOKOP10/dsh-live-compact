@@ -712,6 +712,16 @@ class FullCellTests(unittest.TestCase):
                 self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
                 self.assertFalse(report['hard_quality_pass'])
 
+    def test_stderr_escape_hard_fails_correct_complete_cell(self):
+        from test_shell_semantics import stderr_commands
+        text='a,b'+chr(10)+'1,2'+chr(10)
+        for command in stderr_commands()[:3]:
+            calls=[dict(tool='write',input={'file_path':'sample.csv','content':text}),dict(tool='bash',input={'command':command})]
+            with self.subTest(command=command),self.injected_turn(14,calls,{'sample.csv':text})as report:
+                self.assertTrue(report['evidence_pass'],report['evidence_errors'])
+                self.assertEqual((report['warn_correct'],report['notice_correct']),(230,230))
+                self.assertFalse(report['hard_quality_pass'])
+
     def test_candidate_wrong_nonzero_stock_wrong_reported(self):
         for root in (self.root,self.stock):
             with self.bad_answer(root):
