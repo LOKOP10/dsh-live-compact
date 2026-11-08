@@ -258,6 +258,64 @@ class AnswerGrammarTests(unittest.TestCase):
         self.assertTrue(fill_answer('WARN: 7\n'+NOTICE[4]+'.', 4))
         self.assertTrue(fill_answer('WARN: 7\nNOTICE 原文行（2 条）：\n'+NOTICE[4], 4))
 
+    def test_warn_count_never_uses_a_numeric_substring(self):
+        for turn in (2, 4, 14):
+            count = 3 + turn % 9
+            base = f'WARN: {count}\nNOTICE: {NOTICE.get(turn, "NONE")}'
+            for number in (f'-{count}', f'+{count}', f'1.{count}', f'1e{count}',
+                           f'1e+{count}', f'1,{count}', f'−{count}'):
+                for extra in (f'本轮共有 {number} 条 WARN。',
+                              f'There are {number} WARN lines.'):
+                    with self.subTest(turn=turn, extra=extra):
+                        errors = fill_answer(base+'\n'+extra, turn)
+                        self.assertTrue(any(x.startswith('WARN ') for x in errors))
+            self.assertEqual(fill_answer(base+f'\n共有 {count} 条 WARN。', turn), [])
+
+    def test_notice_annotations_cannot_reverse_count_in_words(self):
+        for turn in (2, 4):
+            count, other = int(turn in NOTICE), 'zero' if turn in NOTICE else 'one'
+            base = f'WARN: {3+turn%9}\nNOTICE: {NOTICE.get(turn, "NONE")}'
+            for suffix in (f'(actually {other})', f'(fixture verified (actually {other}))',
+                           f'(in fact {other})', '(actually none)', '(实际为一条)'):
+                with self.subTest(turn=turn, suffix=suffix):
+                    errors = fill_answer(base+f'\nNOTICE count: {count} {suffix}', turn)
+                    self.assertTrue(any(x.startswith('NOTICE ') for x in errors))
+
+    def test_notice_existence_negation_has_polarity(self):
+        for turn in (2, 4):
+            base = f'WARN: {3+turn%9}\nNOTICE: {NOTICE.get(turn, "NONE")}'
+            correct = 'NOTICE is not absent.' if turn in NOTICE else 'NOTICE is not present.'
+            wrong = 'NOTICE is not present.' if turn in NOTICE else 'NOTICE is not absent.'
+            with self.subTest(turn=turn):
+                self.assertTrue(fill_answer(base+'\n'+wrong, turn))
+                self.assertEqual(fill_answer(base+'\n'+correct, turn), [])
+
+    def test_read_summary_cannot_hide_a_current_answer(self):
+        for turn in (2, 4, 14):
+            count, n = 3+turn%9, int(turn in NOTICE)
+            base = f'WARN: {count}\nNOTICE: {NOTICE.get(turn, "NONE")}'
+            suffix = (f'（520 行，已做大小写不敏感复核，{count+n} 处匹配 = '
+                      f'{count} 条 WARN + {n} 条 NOTICE）：')
+            for prefix in (f'已读取 part{turn}.log；当前 WARN: {count+1}',
+                           f'已读取 part{turn}.log；NOTICE is not '+('present' if n else 'absent')):
+                with self.subTest(turn=turn, prefix=prefix):
+                    self.assertTrue(fill_answer(base+'\n'+prefix+suffix, turn))
+            self.assertEqual(fill_answer(base+f'\n已读取 part{turn}.log'+suffix, turn), [])
+            for wrong in (suffix.replace('520 行', '20 行'),
+                          suffix.replace(f'{count+n} 处', f'{count+n+1} 处')):
+                self.assertTrue(fill_answer(base+f'\n已读取 part{turn}.log'+wrong, turn))
+
+    def test_combined_fields_cannot_hide_conflicting_assertions(self):
+        for name, sample in (('recall', RECALL), ('status', STATUS)):
+            base = sample.replace('code: E1729\nshard: 0x3F\n', '')
+            for value in ('E1729 / 0x3F；code: NONE；shard: NONE',
+                          'E1729 / 0x3F (actually no error)',
+                          'E1729 / 0x3F；错误码为 NONE',
+                          'E1729 / 0x3F；port: 8642'):
+                with self.subTest(name=name, value=value):
+                    self.assertTrue(fields(base+'报错码与分片: '+value, name))
+            self.assertEqual(fields(base+'报错码与分片: E1729 / 0x3F', name), [])
+
     def test_labeled_fields_tables_lists_and_headings(self):
         for name, sample in (('recall', RECALL), ('hidden', HIDDEN), ('status', STATUS)):
             rows = [x.split(': ', 1) for x in sample.splitlines() if ': ' in x]
@@ -318,6 +376,28 @@ class ToolEvidenceTests(unittest.TestCase):
     def parsed(self, items, turn):
         write_events(self.path, items)
         return parse_turn(self.path, turn, self.cwd, 'sid')
+
+    def test_answer_contradictions_reach_the_turn_quality_score(self):
+        for turn in (2, 4, 14):
+            w, n = 3+turn%9, int(turn in NOTICE)
+            claims = (
+                (f'共有 -{w} 条 WARN。', 'WARN'),
+                (f'共有 1.{w} 条 WARN。', 'WARN'),
+                (f'NOTICE count: {n} (actually '+('zero' if n else 'one')+')', 'NOTICE'),
+                ('NOTICE is not '+('present' if n else 'absent')+'.', 'NOTICE'),
+                (f'已读取 part{turn}.log；当前 WARN: {w+1}'
+                 f'（520 行，已做大小写不敏感复核，{w+n} 处匹配 = {w} 条 WARN + {n} 条 NOTICE）：', 'WARN'),
+            )
+            for claim, kind in claims:
+                with self.subTest(turn=turn, claim=claim):
+                    items = events(turn, self.cwd, 'sid')
+                    items[-1]['text'] += '\n'+claim
+                    parsed = self.parsed(items, turn)
+                    self.assertEqual(parsed['evidence_errors'], [])
+                    self.assertTrue(parsed['expected_read'])
+                    self.assertFalse(parsed[kind.lower()+'_correct'])
+                    self.assertTrue(parsed['quality_errors'])
+                    self.assertEqual(len(parsed['usage']), 2)
 
     def test_parser_rejects_contradiction_next_to_a_log_example(self):
         items = events(2, self.cwd, 'sid')

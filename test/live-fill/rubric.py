@@ -124,7 +124,10 @@ def counts_before_warn(line):
 
     noun = re.compile(r'(?:条目|条|行)?\s*WARN(?![a-zA-Z0-9_])'
                       r'(?:\s*(?:条目|条|行)|\s+(?:lines?|entr(?:y|ies)|rows?|records?|messages?)\b)?', re.I)
-    for match in re.finditer(r'\d+', line):
+    # A signed, fractional, grouped or exponential number must never donate
+    # its last digit sequence as a separate integer count.
+    number = r'(?<![a-zA-Z0-9_.+−-])[+−-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:[eE][+-]?\d+)?(?![a-zA-Z0-9_.])'
+    for match in re.finditer(number, line):
         before_end = annotation_end(match.end())
         counted = noun.match(line, before_end)
         if counted:
@@ -186,15 +189,26 @@ def notice_count_value(value, expected):
     if not match or match[1] != str(expected):
         return False
     suffix = match[2]
-    stack = []
+    stack, explanation = [], []
     for char in suffix:
         if char in '(（':
             stack.append(')' if char == '(' else '）')
-        elif char in ')）' and (not stack or stack.pop() != char):
+            explanation.append(' ')
+        elif char in ')）':
+            if not stack or stack.pop() != char:
+                return False
+            explanation.append(' ')
+        elif stack:
+            explanation.append(char)
+        elif not char.isspace():
             return False
-    # File/line references explain the count; they are not alternate values.
-    explanation = re.sub(r'\bpart\d+\.log\b|\bline\s+\d+\b', '', suffix, flags=re.I)
-    return not (stack or re.search(UNCERTAIN+r'|\d|(?:'+ALTERNATIVE+r'|/)\s*(?:none|zero|one)\b', explanation, re.I))
+    # Only bounded explanations, including references, may accompany a count.
+    # Arbitrary words can assert a second count just as digits can.
+    annotation = (r'fixture verified\b|verified\b|read in full\b|no extra lines\b|'
+                  r'checked\s+(?:part[1-9]\d*\.log|line\s+[1-9]\d*)\b|'
+                  r'read WARN or NOTICE entries\b|已核实|已完整读取文件')
+    return not stack and bool(re.fullmatch(r'(?:\s|[,，;；:：.。]|'+annotation+r')*',
+                                           ''.join(explanation), re.I))
 
 
 def fill_answer(text, turn):
@@ -204,9 +218,10 @@ def fill_answer(text, turn):
     for line in lines(text):
         if re.fullmatch(r'\d+(?:\s*(?:or|或|/)\s*\d+)?\s*(?:条)?[。.]?', line):
             bad.append('WARN ambiguous unlabeled numeric answer')
-        summary = re.fullmatch(r'已读取 .*（\d+ 行，已做大小写不敏感复核，\d+ 处匹配 = (\d+) 条 WARN \+ (\d+) 条 NOTICE）：', line)
+        summary = re.fullmatch(r'已读取 (?:\./)?part([1-9]\d*)\.log（(\d+) 行，已做大小写不敏感复核，(\d+) 处匹配 = (\d+) 条 WARN \+ (\d+) 条 NOTICE）：', line)
         if summary:
-            if summary.groups() != (str(3 + turn % 9), str(int(turn in NOTICE))):
+            w, n = 3 + turn % 9, int(turn in NOTICE)
+            if summary.groups() != tuple(map(str, (turn, 520, w+n, w, n))):
                 bad.append('WARN/NOTICE contradictory summary')
             continue
         row = cells(line)
@@ -291,6 +306,10 @@ def fill_answer(text, turn):
             present = bool(re.search(r'NOTICE\s*(?:存在|is present)|(?:有|\bthere is\s*)\s*(?:一|1)\s*(?:条\s*)?NOTICE', line, re.I))
             if (absent and turn in NOTICE) or (present and turn not in NOTICE):
                 bad.append('NOTICE contradictory supplemental claim')
+            for claim in re.finditer(r'\bNOTICE\s+is\s+(not\s+)?(present|absent|NONE)\b', line, re.I):
+                exists = (claim[2].lower() == 'present') != bool(claim[1])
+                if exists != (turn in NOTICE):
+                    bad.append('NOTICE contradictory supplemental claim')
             for value in notice_count_values(line):
                 if not notice_count_value(value, int(turn in NOTICE)):
                     bad.append('NOTICE contradictory supplemental count')
@@ -404,14 +423,13 @@ def fields(text, name):
                     bad.append(f'{name}: contradictory supplemental assertion')
                 continue
         if label == 'combined' or re.fullmatch(COMBINED_ERROR, label, re.I):
-            # Require both actual tokens, not exit code 3 in place of E1729.
-            for key, pattern in (('报错码|code', r'\bE1729\b'), ('分片|shard', r'\b0x3F\b')):
+            # Match the entire bounded combined value. Merely finding both
+            # tokens can hide contradictory assertions later in this field.
+            combined = bool(re.fullmatch(r'E1729\s*(?:/|,|，|;|；|and|与|和)\s*(?:shard\s+)?0x3F', value, re.I))
+            combined = combined or value == 'E1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)'
+            for key in ('报错码|code', '分片|shard'):
                 if key in seen:
-                    seen[key].append(bool(re.search(pattern, value)) and not re.search(UNCERTAIN + '|' + ALTERNATIVE + r'|\bnot\b|不是|并非|无报错|已修复', value, re.I))
-            if re.search(r'\bE\d+\b', value) and set(re.findall(r'\bE\d+\b', value)) != {'E1729'}:
-                bad.append(f'{name}: contradictory error code')
-            if set(re.findall(r'\b0x[0-9a-f]+\b', value, re.I)) - {'0x3F'}:
-                bad.append(f'{name}: contradictory shard')
+                    seen[key].append(combined)
             pending = None
             continue
         # A quoted full original check diagnostic also explicitly supplies code

@@ -124,6 +124,12 @@ answers or contradictory NONE/NOTICE fail. NOTICE text must match the unique
 entire expected original line, with no suffix. Clearly historical named-part
 sequences are context; explicit current labels override that exemption.
 Supplemental citations cannot add false NOTICE lines or conflicting counts.
+Supplemental counts audit the whole signed/decimal/exponent token rather than
+its trailing digits. NOTICE count annotations use bounded read/verification
+phrases; words such as `actually one` cannot override a verified zero. Accepted
+NOTICE presence/absence sentences include their `not` polarity. The special
+read summary names only the current `partN.log`, verifies its 520-line fixture
+and total matches, and cannot consume unrelated current assertions in a prefix.
 An unrelated tool does not prove
 a read: the scorer pairs real `callId`s, validates the requested and returned
 path, successful result and numbered fixture text. Built-in `read`, an exact
@@ -143,7 +149,9 @@ listed there, with presentation-only synonyms in `rubric.py`. Fields use
 `label: value`, labeled lists, two-column tables or a field heading followed by
 its value, one unique assertion per field. Supporting prose supplies no missing
 facts; explicit contradictions still fail. Combined error-code/shard fields
-must contain E1729 and 0x3F; exit 3 never implies E1729. Conflicting values,
+must match a complete E1729/0x3F pair or the exact original diagnostic;
+finding those tokens somewhere in a longer contradictory field is insufficient.
+Exit 3 never implies E1729. Conflicting values,
 missing facts and uncertainty fail. The example
 answers in `synthetic.py` document accepted formatting, not alternate prompts.
 
