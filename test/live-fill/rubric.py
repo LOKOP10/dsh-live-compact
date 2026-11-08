@@ -422,6 +422,357 @@ def fill_answer(text, turn):
     return bad
 
 
+def normal_fill_answer(text, turn):
+    """Judge current facts while allowing ordinary Markdown and explanations."""
+    expected_warn = 3 + turn % 9
+    errors = []
+    counts = []
+    invalid_count = False
+    history = r'历史|此前|早前|趋势|earlier|previous|history'
+
+    def historical_claim(line, position):
+        prefix = re.split(r'[；;。.,，→>\n）)]', line[:position])[-1]
+        return bool(re.search(history, prefix, re.I)) and not bool(
+            re.search(r'当前|本轮|实际|now|current|this\s+round', prefix, re.I))
+
+    count_patterns = (
+        r'\bWARN\b\s*(?:条数|数量|count|matches|总数)\s*(?:[:：=为]|is)\s*([^\s，；;。|`*（）()]+)',
+        r'\bWARN\s*[:：]\s*([^\s，；;。|`*（）()]+)',
+        r'(?:共有|本轮共有|there\s+are)\s+([^\s，；;。|`*（）()]+)\s*(?:条\s*)?WARN\b',
+    )
+    def strip_markdown_emphasis(value):
+        result = []
+        code_delimiter = None
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == '`':
+                end = index + 1
+                while end < len(value) and value[end] == '`':
+                    end += 1
+                delimiter = value[index:end]
+                result.append(delimiter)
+                if code_delimiter is None:
+                    code_delimiter = delimiter
+                elif delimiter == code_delimiter:
+                    code_delimiter = None
+                index = end
+            elif code_delimiter is None and value.startswith('**', index):
+                index += 2
+            else:
+                result.append(char)
+                index += 1
+        return ''.join(result)
+
+    raw_lines = [strip_markdown_emphasis(re.sub(r"^(?:>\s*|[-*+] |\d+[.)] )", "", x.strip())).strip()
+                 for x in text.splitlines() if x.strip() and not x.strip().startswith("```")]
+    for line in raw_lines:
+        for pattern in count_patterns:
+            for match in re.finditer(pattern, line, re.I):
+                if historical_claim(line, match.start()):
+                    continue
+                token = match[1]
+                if not re.fullmatch(r'(?:0|[1-9][0-9]*(?:,[0-9]{3})*)', token):
+                    invalid_count = True
+                    continue
+                counts.append(int(token.replace(',', '')))
+    if invalid_count:
+        errors.append('WARN current count invalid')
+    if not counts:
+        errors.append('WARN current count missing')
+    elif set(counts) != {expected_warn}:
+        errors.append('WARN current count incorrect or contradictory')
+
+    expected_notice = NOTICE.get(turn)
+    notice_none = 0
+    notice_values = []
+    ignored_labels = {'original', 'line', 'rows', 'count', 'matches', 'entries',
+                      'is', 'was', 'has', 'in', 'text', 'answer'}
+
+    def clean_notice(value, strip_closing=True):
+        value = value.strip()
+        # A labelled citation is extracted from inside its opening backtick,
+        # so remove only that one closing delimiter. Preserve literal `*` and
+        # other punctuation that belongs to the cited line.
+        if strip_closing and value.endswith('`') and not value.startswith('`'):
+            value = value[:-1].rstrip()
+        while len(value) >= 2 and value[0] == value[-1] and value[0] in '`*_':
+            value = value[1:-1].strip()
+        return value.strip()
+
+    def segment(value):
+        code_delimiter = None
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == '`':
+                end = index + 1
+                while end < len(value) and value[end] == '`':
+                    end += 1
+                delimiter = value[index:end]
+                if code_delimiter is None:
+                    code_delimiter = delimiter
+                elif delimiter == code_delimiter:
+                    code_delimiter = None
+                index = end
+                continue
+            if code_delimiter is None and char in '；;。':
+                return value[:index], index
+            index += 1
+        return value, len(value)
+
+    def segment_prefix(value):
+        code_delimiter = None
+        start = 0
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == '`':
+                end = index + 1
+                while end < len(value) and value[end] == '`':
+                    end += 1
+                delimiter = value[index:end]
+                if code_delimiter is None:
+                    code_delimiter = delimiter
+                elif delimiter == code_delimiter:
+                    code_delimiter = None
+                index = end
+                continue
+            if code_delimiter is None and char in '；;。':
+                start = index + 1
+            index += 1
+        return value[start:]
+
+    def find_closing_delimiter(value, start, delimiter):
+        index = start
+        while index < len(value):
+            if value[index] != '`':
+                index += 1
+                continue
+            end = index + 1
+            while end < len(value) and value[end] == '`':
+                end += 1
+            if value[index:end] == delimiter:
+                return index
+            index = end
+        return -1
+
+    for line in raw_lines:
+        skip_until = -1
+        for occurrence in re.finditer(r'\bNOTICE\b', line, re.I):
+            prefix_text = segment_prefix(line[:occurrence.start()])
+            if occurrence.start() < skip_until or historical_claim(line, occurrence.start()):
+                continue
+            if re.search(r'(?:当前|本轮|实际|this\s+round|now|current).{0,20}(?:没有|不存在|未找到|不是|并非|not|without|no)\s*`*\s*$',
+                         prefix_text, re.I):
+                notice_values.append('__NEGATED_NOTICE__')
+                skip_until = occurrence.end()
+                continue
+            if re.search(r'(?:没有|不存在|未找到|查找|全文.*(?:0|没有|匹配|查找|大小写)|只有|同样|得到|命中|全文中的|这条|次数|数量|\bsearched\b|\bsearch\b|\bno\b|\bwithout\b)', prefix_text, re.I):
+                continue
+            if re.search(r'(?:不是|并非|没有|不存在|未找到|not|without|no)\s*`+\s*$', prefix_text, re.I):
+                notice_values.append('__NEGATED_NOTICE__')
+                skip_until = occurrence.end()
+                continue
+            if occurrence.start() > 0 and line[occurrence.start() - 1] == '`':
+                opening = occurrence.start() - 1
+                while opening > 0 and line[opening - 1] == '`':
+                    opening -= 1
+                delimiter = line[opening:occurrence.start()]
+                close = find_closing_delimiter(line, occurrence.end(), delimiter)
+                if close != -1:
+                    if re.search(r'(?:不是|并非|没有|不存在|未找到|not|without|no)\s*`?\s*$',
+                                 line[:occurrence.start()], re.I):
+                        notice_values.append('__NEGATED_NOTICE__')
+                        skip_until = close + 1
+                        continue
+                    notice_values.append(line[occurrence.start():close])
+                    skip_until = close + 1
+                    continue
+            rest = line[occurrence.end():]
+            if (re.search(r'全文|匹配|大小写', prefix_text, re.I)
+                    and re.search(r'命中\s*0|0\s*条|未找到|没有', rest, re.I)):
+                continue
+            labelled = re.match(
+                r'\s*(?:原文行?(?:（[^）]*）)?|original(?:\s+line)?|line)?\s*[:：=]\s*(.*)$',
+                rest, re.I)
+            if labelled:
+                raw_body, consumed = segment(labelled[1])
+                if re.match(r'\s*(?:NONE|无)(?=\s|[（(]|$)', raw_body, re.I):
+                    notice_none += 1
+                    skip_until = len(line)
+                    continue
+                raw_text = None
+                raw_prefix = ''
+                if not re.match(r'\s*(?:NONE|无)\b', raw_body, re.I):
+                    for raw_match in re.finditer(r'\bNOTICE\b', raw_body, re.I):
+                        opening = raw_match.start() - 1
+                        while opening > 0 and raw_body[opening - 1] == '`':
+                            opening -= 1
+                        delimiter = raw_body[opening:raw_match.start()]
+                        if delimiter:
+                            close = find_closing_delimiter(raw_body, raw_match.end(), delimiter)
+                            if close != -1:
+                                raw_text = raw_body[raw_match.start():close]
+                                raw_prefix = raw_body[:raw_match.start()]
+                                break
+                    if raw_text is None:
+                        raw_match = re.search(r'\bNOTICE\b.*$', raw_body, re.I)
+                        if raw_match:
+                            raw_text = raw_match[0]
+                            raw_prefix = raw_body[:raw_match.start()]
+                if raw_text and re.search(r'(?:不是|并非|没有|不存在|未找到|not|without|no)\s*`*\s*$',
+                                          raw_prefix, re.I):
+                    notice_values.append('__NEGATED_NOTICE__')
+                    skip_until = occurrence.end() + labelled.start(1) + consumed
+                    continue
+                body = clean_notice(raw_text if raw_text is not None else raw_body,
+                                    strip_closing=raw_text is None)
+                if re.fullmatch(r'NONE(?:\s*[（(].*)?', body, re.I) or body == '无':
+                    notice_none += 1
+                elif body and (body.upper().startswith('NOTICE ') or not re.search(
+                        r'第|行|条|line|original|count', body, re.I)):
+                    notice_values.append(body if body.upper().startswith('NOTICE ') else 'NOTICE ' + body)
+                skip_until = occurrence.end() + labelled.start(1) + consumed
+                continue
+            raw_body, _ = segment(rest)
+            body = clean_notice(raw_body)
+            if not body:
+                continue
+            if re.search(r'(?:不是|并非|没有|不存在|未找到|not|without|no)\s+NOTICE\b', body, re.I):
+                notice_values.append('__NEGATED_NOTICE__')
+                continue
+            if re.search(r'^(?:这次|本次|此次|该次).*(?:出现|一条|缓存|配置|记录)', body, re.I):
+                continue
+            first = body.split()[0].lower()
+            if first in ignored_labels:
+                continue
+            if re.fullmatch(r'NONE(?:\s*[（(].*)?', body, re.I) or body == '无':
+                notice_none += 1
+            else:
+                notice_values.append(body if body.upper().startswith('NOTICE ') else 'NOTICE ' + body)
+
+    if expected_notice:
+        if notice_none or notice_values != [expected_notice]:
+            errors.append('NOTICE current answer missing or contradictory')
+    else:
+        if notice_values or notice_none != 1:
+            errors.append('NOTICE current answer missing or contradictory')
+    return errors
+
+
+def normal_recall_errors(text):
+    """Check frozen recall facts without accepting historical values."""
+    expected_by_key = {
+        '缓存|cache': r'\bSQLite\b',
+        '当前端口|端口|port': r'(?<![\d.+\-eE])9310(?![\d.,eE])',
+        '限流|ratelimit': r'(?<![\d.+\-eE])37(?![\d.,eE])\s*(?:次\s*)?/(?:分钟|min)|(?<![\d.+\-eE])37(?![\d.,eE])\s+per\s+minute',
+        '告警阈值|阈值|threshold': r'(?<![\d.,+\-eE])0\.875(?![\d.,eE])',
+        '失败的测试|测试|test': r'\btests/test_ledger\.py\b',
+        '审核人|reviewer': r'\bOkafor\b',
+        '名字|name': r'\bBluebird\b',
+        '金额格式|currency': r'\bUSD\b(?=.*(?:两位小数|2\s*decimals?|two\s+decimal\s+places))',
+        '区域|region': r'\beu-west-3\b',
+        '值班人|oncall': r'@mirela\b',
+        '工单|ticket': r'\bLED-4471\b',
+        '成本上限|budget': r'(?<![\d.,+\-eE$])\$?412(?![\d.,eE])',
+        '报错码|code': r'\bE1729\b',
+        '分片|shard': r'\b0x3F\b',
+    }
+    errors = []
+    old = r'旧值|旧|此前|早前|废弃|停用|old|former|previous|deprecated'
+    numeric_keys = {'当前端口|端口|port', '告警阈值|阈值|threshold', '成本上限|budget'}
+    for key, expected in expected_by_key.items():
+        label = ALIASES.get(key, key)
+        if key == '名字|name':
+            label = r'名字(?:（(?:项目)?代号）)?|名称|代号|name'
+        elif key == '报错码|code':
+            label = r'(?:check\.sh\s*(?:的)?\s*)?(?:报错码|错误码|报错原文|报错|error code|code)'
+        present = False
+        wrong = False
+        text_lines = lines(text)
+        for index, line in enumerate(text_lines):
+            label_matches = list(re.finditer(
+                r'(?<!\w)(?:' + label + r')(?![A-Za-z0-9_])\s*(?:[:：=]|为|is)?',
+                line, re.I))
+            for match_index, match in enumerate(label_matches):
+                prefix = re.split(r'[；;。,，]', line[:match.start()])[-1]
+                if re.search(old, prefix, re.I):
+                    continue
+                end = (label_matches[match_index + 1].start()
+                       if match_index + 1 < len(label_matches) else len(line))
+                tail = re.split(r'[；;。]', line[match.end():end], maxsplit=1)[0]
+                for clause in (tail,):
+                    old_marker = re.search(old, clause, re.I)
+                    current = clause.strip()
+                    if not current:
+                        continue
+                    if key == '报错码|code':
+                        codes = re.findall(r'\bE\d+\b', current, re.I)
+                        value_match = re.search(expected, current, re.I)
+                        if value_match and re.search(r'不是|并非|非|not|without', current[:value_match.start()], re.I):
+                            wrong = True
+                        elif any(code.upper() != 'E1729' for code in codes):
+                            wrong = True
+                        elif value_match:
+                            if old_marker and value_match.start() >= old_marker.end():
+                                wrong = True
+                            elif (old_marker and value_match.start() < old_marker.start()
+                                  and re.search(r'(?:为|是)\s*(?:旧值|旧|此前|早前|废弃|停用|old|former|previous|deprecated)',
+                                                current[value_match.end():old_marker.end()], re.I)):
+                                wrong = True
+                            elif (old_marker and value_match.start() < old_marker.start()
+                                  and re.search(old, current[value_match.end():old_marker.end()], re.I)
+                                  and not re.search(r'\bE\d+\b', current[old_marker.end():], re.I)):
+                                wrong = True
+                            present = True
+                        elif re.search(r'原文|raw|error|check', current, re.I) and not old_marker:
+                            following = '\n'.join(text_lines[index + 1:index + 3])
+                            follow_codes = re.findall(r'\bE\d+\b', following, re.I)
+                            if (re.search(expected, following, re.I)
+                                    and not re.search(r'不是|并非|非|not|without', following, re.I)
+                                    and not re.search(old, following, re.I)
+                                    and not any(code.upper() != 'E1729' for code in follow_codes)):
+                                present = True
+                            elif follow_codes or re.search(old, following, re.I):
+                                wrong = True
+                        elif not codes and not value_match:
+                            wrong = True
+                        continue
+                    value_match = re.search(expected, current, re.I)
+                    if value_match:
+                        if old_marker and key in numeric_keys:
+                            after_old = clause[old_marker.end():]
+                            if (re.search(r'\d', after_old)
+                                    and (value_match.start() >= old_marker.end()
+                                         or re.search(r'当前|本轮|实际|now|current|this\s+round|为|是',
+                                                      after_old, re.I))):
+                                wrong = True
+                        if old_marker and value_match.start() >= old_marker.end():
+                            wrong = True
+                        if old_marker and value_match.start() < old_marker.start():
+                            after_value = clause[value_match.end():old_marker.end()]
+                            if re.search(r'(?:为|是)\s*(?:旧值|旧|此前|早前|废弃|停用|old|former|previous|deprecated)',
+                                         after_value, re.I):
+                                wrong = True
+                        before = current[:value_match.start()]
+                        after = current[value_match.end():]
+                        if (re.search(r'不是|并非|非|无|not|without|except', before, re.I)
+                                or re.search(r'(?:为|是)\s*$', after, re.I)):
+                            wrong = True
+                        else:
+                            present = True
+                    elif key in numeric_keys and re.search(r'\d', current):
+                        wrong = True
+                    elif key == '分片|shard' and re.search(r'0x[0-9A-Fa-f]+', current):
+                        wrong = True
+                    else:
+                        wrong = True
+        if not present or wrong:
+            errors.append(f'recall: missing or incorrect {key}')
+    return errors
+
+
 # Label synonyms change presentation only; keys/expected values remain frozen.
 ALIASES = {
     '缓存|cache': r'缓存(?:方式|类型)?|cache(?: backend)?',

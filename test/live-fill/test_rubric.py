@@ -7,13 +7,90 @@ from pathlib import Path, PurePosixPath
 
 from contract import MANIFEST, NOTICE, sha
 from mkfx import write_workspace
-from rubric import behavior, check_activity, check_command, check_evidence, fields, fill_answer
+from rubric import (behavior, check_activity, check_command, check_evidence, fields,
+                    fill_answer, normal_fill_answer, normal_recall_errors)
 from command_audit import OPAQUE, tool_errors, bash_input_errors
-from score import parse_turn
+from score import parse_turn, recoverable_model_command
 from synthetic import CHECK, HIDDEN, RECALL, STATUS, events, write_events
 
 
 class AnswerGrammarTests(unittest.TestCase):
+    def test_normal_live_answer_accepts_model_markdown_and_history(self):
+        text = ('已读取 part4.log（共 520 行）。\n'
+                '**WARN 条数：7 条**\n'
+                '**NOTICE 原文行（1 条）：** 第 261 行：`NOTICE cache layer pinned to sqlite`\n'
+                '此前趋势另见 part3。')
+        self.assertEqual(normal_fill_answer(text, 4), [])
+        self.assertEqual(normal_fill_answer('WARN 条数：3\nNOTICE：NONE（全文件无 NOTICE 行）', 9), [])
+
+    def test_normal_live_answer_still_rejects_wrong_current_facts(self):
+        self.assertTrue(normal_fill_answer('WARN 条数：8\nNOTICE：NONE', 4))
+        self.assertTrue(normal_fill_answer('WARN 条数：7\nNOTICE：NONE', 4))
+        self.assertTrue(normal_fill_answer('WARN 条数：4\nNOTICE：NONE', 9))
+        self.assertTrue(normal_fill_answer('WARN 条数：7,000\nNOTICE：NOTICE cache layer pinned to sqlite', 4))
+        self.assertTrue(normal_fill_answer('WARN 条数：7\nNOTICE：NOTICE cache layer pinned to sqlite_disabled', 4))
+        self.assertTrue(normal_fill_answer('WARN 条数：3\nNOTICE：NONE\n更正：本轮有一条 NOTICE，原文为 NOTICE cache layer pinned to sqlite', 9))
+        self.assertTrue(normal_fill_answer('WARN: 7.5\nNOTICE cache layer pinned to sqlite', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE cache layer pinned to sqlite\nNOTICE cache layer pinned to sqlite_disabled', 4))
+        self.assertEqual(normal_fill_answer('WARN: 7（此前为 6）\nNOTICE cache layer pinned to sqlite', 4), [])
+        self.assertTrue(normal_fill_answer('WARN: 7\n当前 WARN: 8（此前为 6）\nNOTICE cache layer pinned to sqlite', 4))
+        self.assertEqual(normal_fill_answer('历史 WARN: 6；当前 WARN: 7\nNOTICE cache layer pinned to sqlite', 4), [])
+        self.assertTrue(normal_fill_answer('earlier WARN: 6. Now WARN: 8\nWARN: 7\nNOTICE cache layer pinned to sqlite', 4))
+        self.assertEqual(normal_fill_answer('历史（WARN: 6）\nWARN: 7\nNOTICE cache layer pinned to sqlite', 4), [])
+        for malformed in ('WARN: 7.5', 'WARN: 7e2', 'WARN: 7,', 'WARN: 7_000'):
+            self.assertTrue(normal_fill_answer(malformed + '\nNOTICE cache layer pinned to sqlite', 4))
+        for malformed in ('NOTICE cache layer pinned to sqlite_disabled', 'NOTICE 404 unexpected'):
+            self.assertTrue(normal_fill_answer('WARN: 7\n' + malformed, 4))
+        self.assertTrue(normal_fill_answer('WARN: 3\nNOTICE: NONE_extra', 9))
+        self.assertTrue(normal_fill_answer('WARN: 3\nNOTICE: NONE-extra', 9))
+        self.assertTrue(normal_fill_answer('WARN: 3\nNOTICE: NONE\nNOTICE 404 unexpected', 9))
+        self.assertTrue(normal_fill_answer('WARN: 7\n`NOTICE cache layer pinned to sqlite_`', 4))
+        self.assertEqual(normal_fill_answer('WARN: 7\nNOTICE: NOTICE cache layer pinned to sqlite', 4), [])
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: not `NOTICE cache layer pinned to sqlite`', 4))
+        self.assertTrue(normal_fill_answer('WARN: 3\nNOTICE: NONE\n查找已完成；当前 NOTICE 404 unexpected', 9))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: `NOTICE cache layer pinned to sqlite*`', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: `NOTICE cache layer pinned to sqlite**`', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\n当前原文不是 `NOTICE cache layer pinned to sqlite`', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\n当前原文不是 NOTICE cache layer pinned to sqlite', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\n``NOTICE cache layer pinned to sqlite**``', 4))
+        self.assertEqual(normal_fill_answer('WARN: 7\nNOTICE: ``NOTICE cache layer pinned to sqlite``', 4), [])
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: ``NOTICE cache layer pinned to sqlite`;**``', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE cache layer pinned to sqlite\n当前没有 NOTICE', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: ``NOTICE cache layer pinned to sqlite;**``', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: not ``NOTICE cache layer pinned to sqlite``', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: not NOTICE cache layer pinned to sqlite', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: ``NOTICE cache layer pinned to sqlite` ``', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE cache layer pinned to sqlite\n当前没有 ``NOTICE cache layer pinned to sqlite``', 4))
+        self.assertTrue(normal_fill_answer('WARN: 7\nNOTICE: ``NOTICE cache layer pinned to sqlite``` ``', 4))
+
+    def test_normal_live_recall_accepts_self_contained_prose(self):
+        text = ('缓存 SQLite；当前端口 9310（旧值 8642 已废弃）；限流 37/分钟；'
+                '告警阈值 0.875；失败的测试 tests/test_ledger.py；审核人 Okafor；'
+                '名字 Bluebird；金额格式 USD 两位小数；区域 eu-west-3；值班人 @mirela；'
+                '工单 LED-4471；成本上限 $412/月；报错码 E1729；分片 0x3F。')
+        self.assertEqual(normal_recall_errors(text), [])
+        self.assertTrue(normal_recall_errors(text.replace('37/分钟', '137/分钟')))
+        self.assertTrue(normal_recall_errors(text.replace('USD 两位小数', 'USDT 两位小数')))
+        self.assertTrue(normal_recall_errors(text.replace('金额格式 USD 两位小数', '金额格式 EUR 两位小数（USD 已停用）')))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310（旧值 8642 已废弃）', '当前端口 8642，旧值 9310 已废弃')))
+        split = text.replace('报错码 E1729；分片 0x3F。',
+                             '报错码：退出码 3，分片 0x3F，原文\nE1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)')
+        self.assertEqual(normal_recall_errors(split), [])
+        self.assertTrue(normal_recall_errors(split.replace('报错码：退出码 3', '报错码：E1730')))
+        self.assertTrue(normal_recall_errors('报错码 未知（旧值 E1729）\n分片 0x3F'))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310（旧值 8642 已废弃）', '当前端口 8642；9310 为旧值')))
+        self.assertTrue(normal_recall_errors(text.replace('报错码 E1729', '报错码 E1730（旧值 E1729）')))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310（旧值 8642 已废弃）', '当前端口 8642，不是 9310')))
+        self.assertTrue(normal_recall_errors(text + '\n报错码 E1730'))
+        self.assertTrue(normal_recall_errors(text.replace('37/分钟', '0.37 per minute')))
+        self.assertTrue(normal_recall_errors(text.replace('告警阈值 0.875', '告警阈值 -0.875')))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310（旧值 8642 已废弃）', '当前端口 9310（旧值，当前为 8642）')))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310（旧值 8642 已废弃）', '当前端口 8642（9310 为旧值）')))
+        self.assertTrue(normal_recall_errors(text.replace('缓存 SQLite', '缓存 Redis（旧值 SQLite）')))
+        self.assertTrue(normal_recall_errors(text.replace('$412/月', '-$412/月')))
+        self.assertTrue(normal_recall_errors(text.replace('报错码 E1729', '报错码 未知（旧值 E1729）')))
+        self.assertTrue(normal_recall_errors(text.replace('当前端口 9310', '当前端口 -9310')))
+        self.assertTrue(normal_recall_errors(text.replace('报错码 E1729', '报错码 E1729（旧值）')))
     def test_normal_read_explanations_do_not_change_the_primary_answer(self):
         text = ('**WARN 条数：6**（行号 181、188、195、202、209、216）\n'
                 '**NOTICE：NONE**（已按大小写不敏感复核，文件中无 notice 字样）')
@@ -422,9 +499,53 @@ class ToolEvidenceTests(unittest.TestCase):
         self.path = Path(self.tmp.name)/'turn.jsonl'
         self.snapshot = {'files': self.initial, 'texts': {}, 'python_headers': {}}
 
-    def parsed(self, items, turn):
+    def parsed(self, items, turn, normal=False):
         write_events(self.path, items)
-        return parse_turn(self.path, turn, self.cwd, 'sid')
+        return parse_turn(self.path, turn, self.cwd, 'sid', normal)
+
+    def test_normal_mode_keeps_recovered_model_command_failure_as_tool_note(self):
+        items = events(2, self.cwd, 'sid')
+        call = dict(type='tool_call', callId='cat-a', tool='bash',
+                    input={'command': 'grep -F WARN missing.log | cat -A', 'workdir': str(self.cwd)})
+        result = dict(type='tool_result', callId='cat-a', status='completed',
+                      result='[stderr]\ncat: illegal option -- A\n[exit code: 1]')
+        items[5:5] = [call, result]
+        parsed = self.parsed(items, 2, normal=True)
+        self.assertEqual(parsed['evidence_errors'], [])
+        self.assertTrue(parsed['expected_read'])
+        self.assertIn('model command failed:', parsed['tool_quality_errors'][0])
+
+    def test_read_only_command_whitelist_is_whole_command(self):
+        self.assertTrue(recoverable_model_command('cat part2.log; grep WARN part2.log'))
+        self.assertFalse(recoverable_model_command('cat part2.log; definitely_unknown'))
+        self.assertFalse(recoverable_model_command('sed -i s/x/y/ part2.log'))
+        self.assertFalse(recoverable_model_command("sed -n 'w /tmp/review-marker' part2.log missing.log"))
+        self.assertFalse(recoverable_model_command('awk -f diagnostic.awk part2.log'))
+        self.assertTrue(recoverable_model_command("grep -E 'WARN|NOTICE' missing.log"))
+        self.assertFalse(recoverable_model_command("awk '/WARN|NOTICE/ {print}' missing.log"))
+        self.assertFalse(recoverable_model_command("sed -n '$p' missing.log"))
+        self.assertFalse(recoverable_model_command("cat missing || sh -c 'touch /tmp/review-marker; exit 1'"))
+        self.assertFalse(recoverable_model_command('cat missing# || sh -c "touch /tmp/review-marker"'))
+
+    def test_normal_mode_unknown_command_failure_stays_hard(self):
+        items = events(2, self.cwd, 'sid')
+        call = dict(type='tool_call', callId='curl', tool='bash',
+                    input={'command': 'curl https://example.invalid', 'workdir': str(self.cwd)})
+        result = dict(type='tool_result', callId='curl', status='completed',
+                      result='curl: failed\n[exit code: 1]')
+        items[5:5] = [call, result]
+        parsed = self.parsed(items, 2, normal=True)
+        self.assertIn('tool command failed', parsed['evidence_errors'])
+
+    def test_normal_mode_still_rejects_missing_read_and_bad_once_only_check(self):
+        items = events(2, self.cwd, 'sid')
+        items = [x for x in items if x.get('type') not in ('tool_call', 'tool_result')]
+        parsed = self.parsed(items, 2, normal=True)
+        self.assertIn('no successful correlated read of expected file', parsed['evidence_errors'])
+        items = events(1, self.cwd, 'sid')
+        next(x for x in items if x.get('type') == 'tool_call' and x.get('tool') == 'bash')['input']['command'] = 'echo check'
+        parsed = self.parsed(items, 1, normal=True)
+        self.assertTrue(any('check execution' in x for x in parsed['evidence_errors']))
 
     def test_answer_contradictions_reach_the_turn_quality_score(self):
         for turn in (2, 4, 14):

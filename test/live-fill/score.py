@@ -3,11 +3,13 @@
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
 from contract import (MANIFEST, GROUPS, ROUNDS, FILL, fingerprints, read_json, sha,
                       validate_contract, write_json)
 from mkfx import build_log, expected_inventory
-from rubric import behavior, check_activity, check_command, check_evidence, fields, fill_answer
+from rubric import (behavior, check_activity, check_command, check_evidence, fields,
+                    fill_answer, normal_fill_answer, normal_recall_errors)
 
 MAX_LOG_BYTES = 16 * 1024 * 1024
 CACHE_FIELDS = ('cacheReadTokens', 'cacheWriteTokens')
@@ -97,7 +99,11 @@ def grep_proof(args, body, expected, cwd, fixture_lines, truncated=False):
         return truncated is not True and body == 'No matches found'
     header = f'Found {len(rows)} matches\n\n{expected.name}\n'
     proof = header + '\n'.join(rows)
-    if body in (proof, proof + '\n'):
+    # rc.2 emits either `partN.log` or `./partN.log`; both identify the same
+    # path after the argument itself has passed same_path().
+    normalized = re.sub(r'(?m)^\./' + re.escape(expected.name) + r'$',
+                        expected.name, body, count=1)
+    if normalized in (proof, proof + '\n'):
         return True
     # Validate even a partial trailing row against the frozen output prefix.
     return (truncated is True and body.startswith(header + rows[0] + '\n')
@@ -119,9 +125,91 @@ def model_validation_error(call, result, cwd):
     return bool(message and same_path(message[1], args['file_path'], cwd))
 
 
-def parse_turn(path, turn, cwd, expected_sid=None):
+def recoverable_model_command(command):
+    """Allow a complete, quoted, read-only diagnostic command or pipeline."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    quote = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\' and quote != "'":
+            escaped = True
+            continue
+        if char in "'\"":
+            quote = None if quote == char else (char if quote is None else quote)
+            continue
+        if quote == "'":
+            continue
+        if char == '`' or (char == '$' and index + 1 < len(command) and command[index + 1] == '('):
+            return False
+        if quote is None and (char in '<>' or char == '&' or char == '\n'):
+            return False
+    if quote is not None or escaped:
+        return False
+    protected = []
+    quote = None
+    escaped = False
+    for char in command:
+        if escaped:
+            protected.append(char)
+            escaped = False
+            continue
+        if char == '\\' and quote != "'":
+            protected.append(char)
+            escaped = True
+            continue
+        if char in "'\"":
+            protected.append(char)
+            quote = None if quote == char else (char if quote is None else quote)
+            continue
+        if quote and char == '|':
+            protected.append('\x1e')
+        elif quote and char == ';':
+            protected.append('\x1f')
+        else:
+            protected.append(char)
+    try:
+        lexer = shlex.shlex(''.join(protected), posix=True, punctuation_chars='|;')
+        lexer.whitespace_split = True
+        lexer.commenters = ''
+        words = list(lexer)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    segments, current = [], []
+    for word in words:
+        if word in {'||', '&&', '&', ';;'}:
+            return False
+        if word in {'|', ';'}:
+            if not current:
+                return False
+            segments.append(current)
+            current = []
+        else:
+            current.append(word.replace('\x1e', '|').replace('\x1f', ';'))
+    if not current:
+        return False
+    segments.append(current)
+    allowed = {'cat', 'grep', 'wc', 'od'}
+    for argv in segments:
+        if argv[0] == 'git':
+            if argv[1:2] != ['status']:
+                return False
+        elif argv[0] not in allowed:
+            return False
+        if any(word in {'rm', 'mv', 'cp', 'chmod', 'chown', 'curl', 'wget',
+                        'python', 'python3', 'node'} for word in argv):
+            return False
+    return True
+
+
+def parse_turn(path, turn, cwd, expected_sid=None, normal_mode=False):
     """Validate rc.2 JSON; retain raw usage and log any proven cache zeros."""
-    bad, quality, calls, usages, pairs = [], [], [], [], {}
+    bad, quality, tool_quality, calls, usages, pairs = [], [], [], [], [], {}
     usage_zero_proofs = []
     sid = final = reason = None
     turn_open = ended = False
@@ -231,13 +319,19 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                     diagnostic = ev['result'][len('[stderr]\n'):] if ev['result'].startswith('[stderr]\n') else ev['result']
                     if (command == 'git status --short --branch' and
                             diagnostic == 'fatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]'):
-                        quality.append('model diagnostic command failed: git status outside repository')
+                        (tool_quality if normal_mode else quality).append(
+                            'model diagnostic command failed: git status outside repository')
                     else:
-                        bad.append('tool command failed')
+                        message = 'model command failed: ' + str(command)
+                        if normal_mode and recoverable_model_command(command):
+                            tool_quality.append(message)
+                        else:
+                            bad.append('tool command failed')
             if ev['status'] == 'error':
                 if model_validation_error(pair[0], ev, cwd):
                     model_tool_errors += 1
-                    quality.append('model tool validation error: file not read')
+                    (tool_quality if normal_mode else quality).append(
+                        'model tool validation error: file not read')
                 else:
                     bad.append('tool infrastructure failure')
             if re.search(r'\[(?:timed out|killed by signal|stopped:|sandbox:)|Command timed out|shell killed', ev['result'], re.I):
@@ -293,7 +387,8 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                         read_ok = True
         if not read_ok:
             bad.append('no successful correlated read of expected file')
-        fill_errors = fill_answer(final or '', turn)
+        fill_errors = (normal_fill_answer(final or '', turn)
+                       if normal_mode else fill_answer(final or '', turn))
     if turn == 1:
         check_pairs = [(c, r) for c, r in pairs.values() if c['tool'] == 'bash'
                        and same_path(c['input'].get('workdir', str(cwd)), cwd, cwd)
@@ -317,7 +412,8 @@ def parse_turn(path, turn, cwd, expected_sid=None):
         if 'E1729 shard 0x3F (expected 9f2c71ab, got 9f2c71ae)' not in (final or ''):
             quality.append('turn 1 did not report exact check failure')
     if turn == 28:
-        quality += fields(final or '', 'recall')
+        quality += (normal_recall_errors(final or '')
+                    if normal_mode else fields(final or '', 'recall'))
     # Legacy quality_errors stays available to callers. It is never a semantic
     # verdict: arbitrary extra prose can escape (or confuse) this heuristic.
     canonical = (f'WARN: {3 + turn % 9}\n' + (MANIFEST['notices'].get(str(turn)) or 'NONE'))
@@ -329,7 +425,8 @@ def parse_turn(path, turn, cwd, expected_sid=None):
     return dict(session_id=sid, final=final, calls=calls, usage=usages, reason=reason,
                 usage_zero_proofs=usage_zero_proofs,
                 evidence_errors=bad, quality_errors=quality + fill_errors,
-                tool_quality_errors=list(quality), fill_machine=fill_machine, expected_read=read_ok,
+                tool_quality_errors=(list(tool_quality) if normal_mode else list(quality)),
+                fill_machine=fill_machine, expected_read=read_ok,
                 first_step_usage=first_step_usage, last_step_usage=last_step_usage,
                 warn_correct=turn in FILL and not any('WARN' in x for x in fill_errors),
                 notice_correct=turn in FILL and not any('NOTICE' in x for x in fill_errors),
@@ -338,7 +435,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 request_finish_reason=None, transport_retries=None)
 
 
-def load_evidence(group, turn, cwd, sid):
+def load_evidence(group, turn, cwd, sid, normal_mode=False):
     prefix = group / f't{turn}'
     meta = read_json(prefix.with_suffix('.meta.json'))
     if meta.get('turn') != turn or meta.get('requested_session') != sid:
@@ -354,7 +451,7 @@ def load_evidence(group, turn, cwd, sid):
     process = read_json(prefix.with_suffix('.process.json'))
     if any(meta.get(key) != value for key, value in process.items()):
         raise ValueError('process metadata mismatch')
-    result = parse_turn(prefix.with_suffix('.jsonl'), turn, cwd, sid)
+    result = parse_turn(prefix.with_suffix('.jsonl'), turn, cwd, sid, normal_mode)
     if meta.get('exit_code') != 0 or meta.get('termination') != 'exited' or meta.get('cleanup') != 'complete':
         result['evidence_errors'].append('process failure/timeout/unclean child cleanup')
     errors = TRANSPORT.findall(prefix.with_suffix('.stderr').read_text(encoding='utf-8'))
@@ -443,7 +540,8 @@ def score_cell(root, *, review_sources=False):
         for turn in range(1, ROUNDS + 1):
             tag = f'g{rid}/t{turn}'
             try:
-                result, snapshot, meta = load_evidence(group, turn, cwd, sid)
+                result, snapshot, meta = load_evidence(
+                    group, turn, cwd, sid, spec.get('model') != 'synthetic-only')
                 if last_end is not None and meta['started'] < last_end:
                     result['evidence_errors'].append('overlapping/out-of-order turns')
                 last_end = meta['ended']
