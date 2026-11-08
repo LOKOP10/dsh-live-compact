@@ -9,7 +9,7 @@ from pathlib import Path
 from contract import HERE, FILL, MANIFEST, read_json, sha, validate_contract
 from mkfx import build_log, write_workspace
 from rubric import fill_answer, fields, behavior
-from score import compare, normalize_usage, parse_turn, score_cell, ratios
+from score import compare, grep_matches, normalize_usage, parse_turn, score_cell, ratios
 from synthetic import RECALL, HIDDEN, STATUS, cell, events, write_events
 
 
@@ -254,9 +254,8 @@ class ParserTests(unittest.TestCase):
         call = next(x for x in items if x['type'] == 'tool_call')
         result = next(x for x in items if x['type'] == 'tool_result')
         call.update(tool='grep', input={'path': str(self.cwd/f'part{turn}.log'), 'pattern': pattern})
-        prefixes = ('WARN', 'NOTICE') if pattern == '(?i)warn|notice' else (pattern,)
         rows = [f'Line {n}: {line}' for n, line in enumerate(build_log(turn)[0].splitlines(), 1)
-                if line.startswith(prefixes)]
+                if grep_matches(pattern, line)]
         result['result'] = (f'Found {len(rows)} matches\n\npart{turn}.log\n' + '\n'.join(rows)
                             if rows else 'No matches found')
         return items, call, result
@@ -282,8 +281,8 @@ class ParserTests(unittest.TestCase):
     def test_builtin_grep_no_match_requires_nonempty_proof(self):
         items, _, _ = self.grep_events(pattern='NOTICE')
         parsed = self.parse_items(items)
-        self.assertFalse(parsed['expected_read'])
-        self.assertEqual(parsed['evidence_errors'], ['no successful correlated read of expected file'])
+        self.assertTrue(parsed['expected_read'])
+        self.assertEqual(parsed['evidence_errors'], [])
         self.assertEqual(parsed['quality_errors'], [])
         # Historical turn 2: WARN, absent NOTICE, then combined search.
         for pattern in ('WARN', '(?i)warn|notice'):
@@ -299,7 +298,9 @@ class ParserTests(unittest.TestCase):
                    dict(path=str(self.cwd.parent/'part2.log')),
                    dict(path=str(self.cwd)), dict(path=str(self.cwd/'part*.log')),
                    dict(path=None), dict(pattern=None), dict(pattern=['WARN']),
-                   dict(pattern='WARN|NOTICE'), dict(pattern='^(a+)+$'),
+                   dict(pattern='WARN|NOTICE|ERROR'), dict(pattern='(?i)WARN'),
+                   dict(pattern='^(WARN|NOTICE)  '), dict(pattern=r'\bNOTICE\b'),
+                   dict(pattern='^(a+)+$'),
                    dict(pattern=''), dict(include='*.log'), dict(context=1)]
         for changes in invalid:
             with self.subTest(changes=changes):
@@ -361,6 +362,26 @@ class ParserTests(unittest.TestCase):
             items, _, result = self.grep_events()
             result.update(result=prefix, truncated=True)
             self.assertFalse(self.parse_items(items)['expected_read'])
+
+    def test_builtin_grep_accepts_finite_equivalent_patterns_and_exact_empty(self):
+        cases = ((2, r'\bWARN\b'), (2, '^(WARN|NOTICE) '),
+                 (2, 'WARN|NOTICE'), (2, '(?i)notice'),
+                 (11, '^(WARN|NOTICE)'))
+        for turn, pattern in cases:
+            with self.subTest(turn=turn, pattern=pattern):
+                items, _, _ = self.grep_events(turn, pattern)
+                parsed = self.parse_items(items, turn)
+                self.assertEqual(parsed['evidence_errors'], [])
+                self.assertTrue(parsed['expected_read'])
+        items, _, result = self.grep_events(2, '(?i)notice')
+        result['result'] = 'No matches found\n'
+        self.assertTrue(self.parse_items(items, 2)['evidence_errors'])
+        items, _, result = self.grep_events(2, '(?i)notice')
+        result['truncated'] = True
+        self.assertTrue(self.parse_items(items, 2)['evidence_errors'])
+        items, _, result = self.grep_events(4, '(?i)notice')
+        result['result'] = 'No matches found'
+        self.assertTrue(self.parse_items(items, 4)['evidence_errors'])
 
     def test_builtin_grep_keeps_pairing_and_infrastructure_failures(self):
         for change in ('unpaired', 'missing', 'duplicate', 'error', 'timeout', 'event', 'essential'):

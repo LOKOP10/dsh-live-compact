@@ -52,21 +52,49 @@ def same_path(value, expected, cwd):
     return (path if path.is_absolute() else Path(cwd) / path).resolve() == Path(expected).resolve()
 
 
+GREP_PATTERNS = (
+    'WARN', 'NOTICE', '(?i)warn|notice', r'\bWARN\b',
+    '^(WARN|NOTICE)', '^(WARN|NOTICE) ', 'WARN|NOTICE', '(?i)notice',
+)
+
+
+def grep_matches(pattern, line):
+    """Apply only the finite built-in grep language; never arbitrary regex."""
+    if pattern == 'WARN':
+        return 'WARN' in line
+    if pattern == 'NOTICE':
+        return 'NOTICE' in line
+    if pattern == '(?i)warn|notice':
+        lowered = line.lower()
+        return 'warn' in lowered or 'notice' in lowered
+    if pattern == r'\bWARN\b':
+        return bool(re.search(r'\bWARN\b', line))
+    if pattern == '^(WARN|NOTICE)':
+        return line.startswith(('WARN', 'NOTICE'))
+    if pattern == '^(WARN|NOTICE) ':
+        return line.startswith(('WARN ', 'NOTICE '))
+    if pattern == 'WARN|NOTICE':
+        return 'WARN' in line or 'NOTICE' in line
+    if pattern == '(?i)notice':
+        return 'notice' in line.lower()
+    return False
+
+
 def grep_proof(args, body, expected, cwd, fixture_lines, truncated=False):
     """Only the bounded built-in grep schema/patterns, never arbitrary regex."""
     pattern = args.get('pattern')
     if (set(args) != {'path', 'pattern'} or
-            pattern not in ('WARN', 'NOTICE', '(?i)warn|notice') or
+            pattern not in GREP_PATTERNS or
             not same_path(args.get('path'), expected, cwd)):
         return False
     rows = []
     for number, line in enumerate(fixture_lines, 1):
-        matches = (('warn' in line.lower() or 'notice' in line.lower())
-                   if pattern == '(?i)warn|notice' else pattern in line)
-        if matches:
+        if grep_matches(pattern, line):
             rows.append(f'Line {number}: {line}')
     if not rows:
-        return False
+        # The rc.2 result schema omits `truncated` for an ordinary complete
+        # result; only an explicit true flag makes a no-match proof unsafe.
+        return truncated is not True and body == 'No matches found'
     header = f'Found {len(rows)} matches\n\n{expected.name}\n'
     proof = header + '\n'.join(rows)
     if body in (proof, proof + '\n'):
@@ -81,8 +109,10 @@ def model_validation_error(call, result, cwd):
     schema = {'edit': {'file_path', 'old_string', 'new_string'},
               'write': {'file_path', 'content'}}
     args = call['input']
-    if (call['tool'] not in schema or set(args) != schema[call['tool']] or
-            any(not isinstance(v, str) for v in args.values()) or result.get('truncated')):
+    allowed = schema.get(call['tool'])
+    if (allowed is None or not set(args) <= allowed | ({'replace_all'} if call['tool'] == 'edit' else set()) or
+            set(args) < allowed or any(not isinstance(v, str) for k, v in args.items() if k != 'replace_all') or
+            ('replace_all' in args and type(args['replace_all']) is not bool) or result.get('truncated')):
         return False
     message = re.fullmatch(r'Error: cannot modify "([^"\n]+)": file has not been read — read the file, then retry', result['result'])
     return bool(message and same_path(message[1], args['file_path'], cwd))
@@ -194,7 +224,12 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 expected_failure = (turn == 1 and same_path(pair[0]['input'].get('workdir', str(cwd)), cwd, cwd)
                                     and check_evidence(pair[0]['input'].get('command', ''), ev['result']))
                 if any(exits) and not expected_failure:
-                    bad.append('tool command failed')
+                    command = pair[0]['input'].get('command', '')
+                    if (command == 'git status --short --branch' and
+                            'fatal: not a git repository' in ev['result']):
+                        quality.append('model diagnostic command failed: git status outside repository')
+                    else:
+                        bad.append('tool command failed')
             if ev['status'] == 'error':
                 if model_validation_error(pair[0], ev, cwd):
                     model_tool_errors += 1
