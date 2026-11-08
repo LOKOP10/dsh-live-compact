@@ -679,7 +679,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   }
 
   async flushPendingCaptures() {
-    if (!this.pendingCaptures.size) return;
+    if (!this.pendingCaptures?.size) return;
     await Promise.allSettled([...this.pendingCaptures]);
   }
 
