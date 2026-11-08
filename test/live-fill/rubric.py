@@ -291,9 +291,9 @@ def fill_answer(text, turn):
                 if excerpts and citation_value:
                     value = citation_value[1]
                 value = re.sub(r'[:：]\s*$', '', value)
-                line_numbers = re.search(r'(?:行号|line numbers?)\s*([0-9][0-9\s,，、]*)', value, re.I)
-                if line_numbers:
-                    cited = [int(x) for x in re.findall(r'\d+', line_numbers[1])]
+                line_number_notes = re.findall(r'(?:行号|line numbers?)\s*([0-9０-９][0-9０-９\s,，、]*)', value, re.I)
+                for line_number_note in line_number_notes:
+                    cited = [int(x) for x in re.findall(r'\d+', line_number_note)]
                     fixture_lines = build_log(turn)[0].splitlines()
                     warn_lines = {n for n, text_line in enumerate(fixture_lines, 1)
                                   if text_line.startswith('WARN ')}
