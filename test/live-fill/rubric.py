@@ -219,6 +219,7 @@ def notice_count_value(value, expected):
 
 def citation_numbers_after_label(line, position):
     tail = line[position:].lstrip()
+    tail = re.sub(r'^(?:[:：=]\s*)', '', tail)
     if tail.startswith(('(', '（')):
         opening, closing = tail[0], ')' if tail[0] == '(' else '）'
         depth = 0
