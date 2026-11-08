@@ -14,6 +14,11 @@ from synthetic import CHECK, HIDDEN, RECALL, STATUS, events, write_events
 
 
 class AnswerGrammarTests(unittest.TestCase):
+    def test_normal_read_explanations_do_not_change_the_primary_answer(self):
+        text = ('**WARN 条数：6**（行号 181、188、195、202、209、216）\n'
+                '**NOTICE：NONE**（已按大小写不敏感复核，文件中无 notice 字样）')
+        self.assertEqual(fill_answer(text, 3), [])
+
     def test_supporting_prose_and_markdown(self):
         for text in (
             '已读取文件，结果如下。\n- **WARN 条数：5**\n- **NOTICE 原文行：NONE**\n文件其余内容为 INFO 心跳。',

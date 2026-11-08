@@ -62,7 +62,7 @@ def answer_value(value):
 
 def warn_value(value, expected):
     """A whole count with only balanced, bounded explanatory annotations."""
-    match = re.fullmatch(r'(0|[1-9]\d*)\s*(.*?)[。.]?', value.strip(), re.I)
+    match = re.fullmatch(r'(0|[1-9]\d*)\s*(?:条|lines?)?\s*(.*?)[。.]?', value.strip(), re.I)
     if not match or match[1] != str(expected):
         return False
     suffix = match[2]
@@ -86,7 +86,8 @@ def warn_value(value, expected):
     annotation = (r'(?:all(?: WARN (?:lines?|entries))?(?: are)?\s+)?ledger drift\b|'
                   r'(?:均为|全部为|全是|都是)\s*(?:同一类\s*)?ledger drift\b|'
                   r'same (?:category|kind)\b|同一类|同类|'
-                  r'e\.g\.?|for example\b|example\b|例如|示例')
+                  r'e\.g\.?|for example\b|example\b|例如|示例|'
+                  r'(?:行号|line numbers?)\s*(?:\d+\s*[,，、\s]*)+')
     return bool(re.fullmatch(r'(?:\s|[,，;；:：.。“”"\'‘’]|'+annotation+r')*',
                              ''.join(explanation), re.I))
 
@@ -285,8 +286,11 @@ def fill_answer(text, turn):
                 citation_value = re.fullmatch(r'(\d+)\s*(?:条|lines?)?\s*[,，]\s*(?:e\.g\.?|for example|example|例如|示例)\s*[:：]?\s*[“”"\'‘’\s]*', value, re.I)
                 if excerpts and citation_value:
                     value = citation_value[1]
-                if not warn_value(value, 3 + turn % 9) or re.match(WARN_LABEL, supplemental, re.I):
+                value = re.sub(r'[:：]\s*$', '', value)
+                if not warn_value(value, 3 + turn % 9):
                     bad.append('WARN ambiguous/contradictory current answer')
+                elif re.match(WARN_LABEL + r'\s*(?:[:：=为共]|\bis\b)', supplemental, re.I):
+                    warn.append(str(3 + turn % 9))
             if re.search(r'(?:not|不是|并非)\s*WARN|WARN\s*(?:不是|并非|isn.t)', supplemental, re.I):
                 bad.append('WARN contradictory current answer')
             if re.search(UNCERTAIN, supplemental, re.I):
@@ -324,7 +328,7 @@ def fill_answer(text, turn):
         if core == 'NONE':
             notice.append(None)
             if explanation and (re.search(UNCERTAIN, explanation, re.I) or
-                                not re.fullmatch(r"(?:文件中)?(?:没有任何|无|没有)\s*NOTICE\s*(?:行|条目)|no NOTICE (?:lines?|entries)", explanation, re.I)):
+                                not re.fullmatch(r"(?:已(?:按|做)大小写不敏感(?:复核|复查)，\s*)?(?:文件中)?(?:没有任何|无|没有)\s*(?:NOTICE|notice)\s*(?:行|条目|字样)|(?:对\s*WARN/NOTICE\s*行做了全文件匹配，\s*)?未命中任何\s*NOTICE\s*行|(?:case-insensitive\s+)?no\s+notice\s+(?:lines?|entries)", explanation, re.I)):
                 bad.append('NOTICE ambiguous explanation')
         elif core.startswith('NOTICE ') and not re.match(r'NOTICE\s+(?:(?:lines?|rows?|count|matches|entries|is|was|has|original|in|text|answer)\b|条数|数量|不存在|存在|为)', core, re.I):
             notice.append(candidate)  # original NOTICE bytes, including any false suffix
