@@ -9,7 +9,7 @@ from pathlib import Path
 from contract import HERE, FILL, MANIFEST, read_json, sha, validate_contract
 from mkfx import build_log, write_workspace
 from rubric import fill_answer, fields, behavior
-from score import compare, grep_matches, normalize_usage, parse_turn, score_cell, ratios
+from score import compare, grep_matches, grep_proof, normalize_usage, parse_turn, score_cell, ratios
 from synthetic import RECALL, HIDDEN, STATUS, cell, events, write_events
 
 
@@ -379,9 +379,31 @@ class ParserTests(unittest.TestCase):
         items, _, result = self.grep_events(2, '(?i)notice')
         result['truncated'] = True
         self.assertTrue(self.parse_items(items, 2)['evidence_errors'])
+        items, _, result = self.grep_events(2, '(?i)notice')
+        result['truncated'] = 'false'
+        self.assertTrue(self.parse_items(items, 2)['evidence_errors'])
         items, _, result = self.grep_events(4, '(?i)notice')
         result['result'] = 'No matches found'
         self.assertTrue(self.parse_items(items, 4)['evidence_errors'])
+
+    def test_grep_proof_uses_fixed_pattern_semantics(self):
+        lines = ['WARN x', 'NOTICE y', 'preWARNpost', 'WARNING', '_WARN_', 'WARN\tz']
+        expected = self.cwd/'part2.log'
+        cases = {
+            r'\bWARN\b': (1, 6),
+            '^(WARN|NOTICE)': (1, 2, 4, 6),
+            '^(WARN|NOTICE) ': (1, 2),
+            'WARN|NOTICE': (1, 2, 3, 4, 5, 6),
+            '(?i)notice': (2,),
+        }
+        for pattern, numbers in cases.items():
+            body = (f'Found {len(numbers)} matches\n\npart2.log\n' +
+                    '\n'.join(f'Line {n}: {lines[n-1]}' for n in numbers))
+            with self.subTest(pattern=pattern):
+                self.assertTrue(grep_proof({'path':str(expected), 'pattern':pattern},
+                                            body, expected, self.cwd, lines, False))
+        self.assertFalse(grep_proof({'path':str(expected), 'pattern':'WARN.*'},
+                                     'No matches found', expected, self.cwd, lines, False))
 
     def test_builtin_grep_keeps_pairing_and_infrastructure_failures(self):
         for change in ('unpaired', 'missing', 'duplicate', 'error', 'timeout', 'event', 'essential'):

@@ -844,6 +844,14 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertEqual(parsed['quality_errors'], ['model tool validation error: file not read'])
         self.assertEqual(parsed['model_tool_errors'], 1)
 
+    def test_replace_all_does_not_hide_missing_edit_field(self):
+        items, call, _ = self.validation_events()
+        call['input'].pop('new_string')
+        call['input']['replace_all'] = True
+        parsed = self.parsed(items, 2)
+        self.assertIn('tool infrastructure failure', parsed['evidence_errors'])
+        self.assertEqual(parsed['model_tool_errors'], 0)
+
     def test_non_repository_git_status_is_a_soft_diagnostic(self):
         items = events(2, self.cwd, 'sid')
         call = dict(type='tool_call', callId='git-status', tool='bash',
@@ -854,6 +862,16 @@ class ToolEvidenceTests(unittest.TestCase):
         parsed = self.parsed(items, 2)
         self.assertEqual(parsed['evidence_errors'], [])
         self.assertIn('model diagnostic command failed: git status outside repository', parsed['quality_errors'])
+
+    def test_git_status_soft_diagnostic_rejects_extra_failure(self):
+        items = events(2, self.cwd, 'sid')
+        call = dict(type='tool_call', callId='git-status', tool='bash',
+                    input={'command': 'git status --short --branch', 'workdir': str(self.cwd)})
+        result = dict(type='tool_result', callId='git-status', status='completed',
+                      result='fatal: not a git repository (or any of the parent directories): .git\nSegmentation fault\n[exit code: 139]')
+        items[3:3] = [call, result]
+        parsed = self.parsed(items, 2)
+        self.assertIn('tool command failed', parsed['evidence_errors'])
 
     def test_unknown_errors_and_transport_failures_are_not_excused(self):
         for change in ('path', 'tool', 'suffix', 'truncated', 'input', 'transport', 'timeout'):

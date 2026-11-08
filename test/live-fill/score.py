@@ -110,8 +110,9 @@ def model_validation_error(call, result, cwd):
               'write': {'file_path', 'content'}}
     args = call['input']
     allowed = schema.get(call['tool'])
-    if (allowed is None or not set(args) <= allowed | ({'replace_all'} if call['tool'] == 'edit' else set()) or
-            set(args) < allowed or any(not isinstance(v, str) for k, v in args.items() if k != 'replace_all') or
+    if (allowed is None or not allowed <= set(args) or
+            not set(args) <= allowed | ({'replace_all'} if call['tool'] == 'edit' else set()) or
+            any(not isinstance(v, str) for k, v in args.items() if k != 'replace_all') or
             ('replace_all' in args and type(args['replace_all']) is not bool) or result.get('truncated')):
         return False
     message = re.fullmatch(r'Error: cannot modify "([^"\n]+)": file has not been read — read the file, then retry', result['result'])
@@ -219,6 +220,8 @@ def parse_turn(path, turn, cwd, expected_sid=None):
             if ev.get('status') not in ('completed', 'error') or not isinstance(ev.get('result'), str):
                 raise ValueError('invalid tool result')
             pair[1] = ev
+            if 'truncated' in ev and type(ev['truncated']) is not bool:
+                bad.append('invalid tool truncation metadata')
             if pair[0]['tool'] == 'bash':
                 exits = [int(x) for x in re.findall(r'\[(?:exit code: |Command finished with exit code |shell exited: code )(-?\d+)\]', ev['result'])]
                 expected_failure = (turn == 1 and same_path(pair[0]['input'].get('workdir', str(cwd)), cwd, cwd)
@@ -226,7 +229,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                 if any(exits) and not expected_failure:
                     command = pair[0]['input'].get('command', '')
                     if (command == 'git status --short --branch' and
-                            'fatal: not a git repository' in ev['result']):
+                            ev['result'] == 'fatal: not a git repository (or any of the parent directories): .git\n[exit code: 128]'):
                         quality.append('model diagnostic command failed: git status outside repository')
                     else:
                         bad.append('tool command failed')
@@ -273,7 +276,7 @@ def parse_turn(path, turn, cwd, expected_sid=None):
                     if all(1 <= int(n) <= len(fixture_lines) and fixture_lines[int(n)-1] == text for n, text in numbered):
                         read_ok = True
             elif call['tool'] == 'grep':
-                if grep_proof(args, body, expected, cwd, fixture_lines, result.get('truncated')):
+                if grep_proof(args, body, expected, cwd, fixture_lines, result.get('truncated', False)):
                     read_ok = True
             elif call['tool'] == 'bash':
                 import shlex
